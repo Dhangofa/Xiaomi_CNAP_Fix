@@ -8,6 +8,9 @@ import android.util.LruCache;
 import android.view.View;
 import android.widget.TextView;
 
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
 import de.robv.android.xposed.IXposedHookLoadPackage;
 import de.robv.android.xposed.XC_MethodHook;
 import de.robv.android.xposed.XposedBridge;
@@ -47,6 +50,11 @@ public class CnapFixHook implements IXposedHookLoadPackage {
     // Xiaomi Phone/Contacts app: Recents list row (com.android.contacts, dump of this build)
     private static final String PKG_CONTACTS = "com.android.contacts";
     private static final String CLS_CALL_VH = "com.android.contacts.dialer.list.VH.DialerCallVH";
+
+    /** Missed-call rows get a repeat count appended to the title: "+91... (3)". */
+    private static final Pattern COUNT_SUFFIX = Pattern.compile("\\s*\\(\\d+\\)\\s*$");
+
+    private static volatile int rejectLogBudget = 40;
 
     /** call-log _id -> CNAP name stored in call_log.name (positive hits only). */
     private static final LruCache<Long, String> NAME_CACHE = new LruCache<Long, String>(256);
@@ -298,29 +306,51 @@ public class CnapFixHook implements IXposedHookLoadPackage {
         if (vh == null || TextUtils.isEmpty(number)) return;
 
         // Number presentation must be allowed (otherwise the row shows "Private"/"Unknown").
-        if (!XposedHelpers.getBooleanField(vh, "k3")) return;
+        if (!XposedHelpers.getBooleanField(vh, "k3")) {
+            reject("presentation not allowed", -1, -1, null, number);
+            return;
+        }
 
         Object vm = XposedHelpers.getObjectField(vh, "g3");
         if (vm == null) return;
 
+        long callId = XposedHelpers.getLongField(vm, "d");
+        long contactKey = XposedHelpers.getLongField(vm, "e");
+
         // A real contact (or yellow-page hit) already has its own title.
-        if (XposedHelpers.getLongField(vm, "e") > 0) return;
+        if (contactKey > 0) {
+            reject("contact key > 0", callId, contactKey, null, number);
+            return;
+        }
 
         TextView title = (TextView) XposedHelpers.getObjectField(vh, "O2");
         if (title == null) return;
 
-        // Only replace a title that is just the number; tags, FDN names, "Unknown" etc. stay.
+        // Missed calls: title is "<number> (<count>)". Keep the count, replace the number.
         String shown = String.valueOf(title.getText());
+        String suffix = "";
+        Matcher m = COUNT_SUFFIX.matcher(shown);
+        if (m.find()) {
+            suffix = shown.substring(m.start());
+            shown = shown.substring(0, m.start());
+        }
+
+        // Only replace a title that is just the number; tags, FDN names, "Unknown" etc. stay.
         String numberDigits = digits(number);
-        if (numberDigits.isEmpty() || !numberDigits.equals(digits(shown))) return;
+        if (numberDigits.isEmpty() || !numberDigits.equals(digits(shown))) {
+            reject("title is not the bare number", callId, contactKey, shown, number);
+            return;
+        }
 
         Context ctx = (Context) XposedHelpers.getObjectField(vh, "I2");
-        long callId = XposedHelpers.getLongField(vm, "d");
         String cnap = lookupStoredCnap(ctx, callId, number);
-        if (cnap == null) return;
+        if (cnap == null) {
+            reject("no stored name in call_log", callId, contactKey, shown, number);
+            return;
+        }
 
-        title.setText(cnap);
-        title.setContentDescription(cnap);
+        title.setText(cnap + suffix);
+        title.setContentDescription(cnap + suffix);
 
         // Number on the secondary line, like a normal contact row.
         try {
@@ -334,7 +364,15 @@ public class CnapFixHook implements IXposedHookLoadPackage {
             debug("secondary number line failed: " + t);
         }
 
-        debug("Recents: title <- CNAP '" + cnap + "' (call " + callId + ", number " + mask(number) + ")");
+        debug("Recents: title <- CNAP '" + cnap + "'" + suffix + " (call " + callId
+                + ", number " + mask(number) + ")");
+    }
+
+    private static void reject(String reason, long callId, long contactKey, String shown, String number) {
+        if (!DEBUG || rejectLogBudget <= 0) return;
+        rejectLogBudget--;
+        debug("Recents skip: " + reason + " [call " + callId + ", key " + contactKey
+                + ", title '" + (shown == null ? "-" : mask(shown)) + "', number " + mask(number) + "]");
     }
 
     /** call_log.name of one row, if it is a real name (not empty, not just the number). */
