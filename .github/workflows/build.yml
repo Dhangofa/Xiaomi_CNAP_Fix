@@ -1,7 +1,5 @@
-name: Test Build WF
-permissions:
-  actions: write
-  contents: read
+name: Test Build
+run-name: ${{ needs.setup.outputs.title }}
 
 on:
   push:
@@ -10,19 +8,27 @@ on:
   workflow_dispatch:
 
 jobs:
-  build:
+  setup:
     runs-on: ubuntu-latest
+    outputs:
+      title: ${{ steps.get_title.outputs.title }}
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: Set Title to Commit Subject Only
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Extract Commit Title Only
+        id: get_title
         run: |
-          # %s extracts strictly the commit subject (first line)
-          TITLE=$(git log -1 --pretty=format:'%s')
-          gh api --method PATCH "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}" -f title="$TITLE"
+          # %s isolates strictly the first line (commit subject)
+          SUBJECT=$(git log -1 --pretty=format:'%s')
+          echo "title=$SUBJECT" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: setup
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
 
       - name: Set up Java Development Kit (JDK)
         uses: actions/setup-java@v4
