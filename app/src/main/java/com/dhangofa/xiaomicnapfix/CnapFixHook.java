@@ -51,6 +51,7 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage.LoadPackageParam;
     private static final String CLS_CARD_INFO = "com.android.incallui.model.CallCardInfo";
 
     // Telecom (runs inside the system process, uid 1000, holds the call-log permissions)
+    private static final String PKG_TELECOM = "com.android.server.telecom";
     private static final String CLS_LOG_TASK = "com.android.server.telecom.CallLogManager$LogCallAsyncTask";
 
     // Xiaomi Phone/Contacts app: Recents list row (com.android.contacts, dump of this build)
@@ -83,10 +84,14 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage.LoadPackageParam;
 
             hookRecentsTitle(lpparam);
 
-        } else if ("android".equals(lpparam.packageName)) {
-            log("system framework scope active (process " + lpparam.processName + ")");
+        } else if (PKG_TELECOM.equals(lpparam.packageName)) {
+            log("loaded into " + lpparam.packageName
+                    + " (process " + lpparam.processName + ")");
 
             hookTelecomCallLog(lpparam);
+
+        } else if ("android".equals(lpparam.packageName)) {
+            log("system framework scope active (process " + lpparam.processName + ")");
         }
     }
 
