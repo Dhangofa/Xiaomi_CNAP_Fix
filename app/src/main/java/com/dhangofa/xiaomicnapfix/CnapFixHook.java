@@ -1,7 +1,12 @@
 package com.dhangofa.xiaomicnapfix;
 
 import android.content.Context;
+import android.database.Cursor;
+import android.provider.CallLog;
 import android.text.TextUtils;
+import android.util.LruCache;
+import android.view.View;
+import android.widget.TextView;
 
 import de.robv.android.xposed.IXposedHookLoadPackage;
 import de.robv.android.xposed.XC_MethodHook;
@@ -39,20 +44,30 @@ public class CnapFixHook implements IXposedHookLoadPackage {
     private static final String CLS_ENTRY = "com.android.incallui.ContactInfoCache$ContactCacheEntry";
     private static final String CLS_CARD_INFO = "com.android.incallui.model.CallCardInfo";
 
+    // Xiaomi Phone/Contacts app: Recents list row (com.android.contacts, dump of this build)
+    private static final String PKG_CONTACTS = "com.android.contacts";
+    private static final String CLS_CALL_VH = "com.android.contacts.dialer.list.VH.DialerCallVH";
+
+    /** call-log _id -> CNAP name stored in call_log.name (positive hits only). */
+    private static final LruCache<Long, String> NAME_CACHE = new LruCache<Long, String>(256);
+
     // android.telecom.TelecomManager.PRESENTATION_RESTRICTED
     private static final int PRESENTATION_RESTRICTED = 2;
 
     @Override
     public void handleLoadPackage(final LoadPackageParam lpparam) {
-        if (!PKG.equals(lpparam.packageName)) {
-            return;
+        if (PKG.equals(lpparam.packageName)) {
+            log("loaded into " + lpparam.packageName
+                    + " (process " + lpparam.processName + ")");
+
+            hookBuildEntry(lpparam);
+            hookCreateCallCardInfo(lpparam);
+        } else if (PKG_CONTACTS.equals(lpparam.packageName)) {
+            log("loaded into " + lpparam.packageName
+                    + " (process " + lpparam.processName + ")");
+
+            hookRecentsTitle(lpparam);
         }
-
-        log("loaded into " + lpparam.packageName
-                + " (process " + lpparam.processName + ")");
-
-        hookBuildEntry(lpparam);
-        hookCreateCallCardInfo(lpparam);
     }
 
     // ------------------------------------------------------------------------------------------
@@ -244,6 +259,113 @@ public class CnapFixHook implements IXposedHookLoadPackage {
         } catch (Throwable t) {
             log("FAILED to hook CallCardInfo.createCallCardInfo: " + t);
         }
+    }
+
+    // ------------------------------------------------------------------------------------------
+    // Hook 3 (com.android.contacts): Recents row title.
+    //
+    // DialerCallVH.c(String number) builds the row title. For a number without a contact
+    // (DialerItemVM.e <= 0, e = cursor column 1) it falls through to "append the raw number";
+    // call_log.name is never read (CalllogQuery / the T9 smart-dialer cursor have no such use).
+    // After c() ran we replace a bare-number title with the CNAP name stored in call_log.name
+    // for that call (DialerItemVM.d = call-log _id), and show the number on the secondary line.
+    //
+    // Obfuscated names below are valid for the dumped build only:
+    //   DialerCallVH.g3 = DialerItemVM, .O2 = title TextView, .S2 = number TextView (lazy, V()),
+    //   .I2 = Context, .k3 = number presentation allowed; DialerItemVM.d/e = long.
+    // ------------------------------------------------------------------------------------------
+    private void hookRecentsTitle(final LoadPackageParam lpparam) {
+        try {
+            XposedHelpers.findAndHookMethod(
+                    CLS_CALL_VH, lpparam.classLoader, "c", String.class,
+                    new XC_MethodHook() {
+                        @Override
+                        protected void afterHookedMethod(MethodHookParam param) {
+                            try {
+                                applyCnapToRecentsRow(param.thisObject, (String) param.args[0]);
+                            } catch (Throwable t) {
+                                log("Recents hook error: " + t);
+                            }
+                        }
+                    });
+            log("hooked DialerCallVH.c(String)");
+        } catch (Throwable t) {
+            log("FAILED to hook DialerCallVH.c(String): " + t);
+        }
+    }
+
+    private static void applyCnapToRecentsRow(Object vh, String number) {
+        if (vh == null || TextUtils.isEmpty(number)) return;
+
+        // Number presentation must be allowed (otherwise the row shows "Private"/"Unknown").
+        if (!XposedHelpers.getBooleanField(vh, "k3")) return;
+
+        Object vm = XposedHelpers.getObjectField(vh, "g3");
+        if (vm == null) return;
+
+        // A real contact (or yellow-page hit) already has its own title.
+        if (XposedHelpers.getLongField(vm, "e") > 0) return;
+
+        TextView title = (TextView) XposedHelpers.getObjectField(vh, "O2");
+        if (title == null) return;
+
+        // Only replace a title that is just the number; tags, FDN names, "Unknown" etc. stay.
+        String shown = String.valueOf(title.getText());
+        String numberDigits = digits(number);
+        if (numberDigits.isEmpty() || !numberDigits.equals(digits(shown))) return;
+
+        Context ctx = (Context) XposedHelpers.getObjectField(vh, "I2");
+        long callId = XposedHelpers.getLongField(vm, "d");
+        String cnap = lookupStoredCnap(ctx, callId, number);
+        if (cnap == null) return;
+
+        title.setText(cnap);
+        title.setContentDescription(cnap);
+
+        // Number on the secondary line, like a normal contact row.
+        try {
+            XposedHelpers.callMethod(vh, "V"); // inflates S2 if it is not there yet
+            TextView secondary = (TextView) XposedHelpers.getObjectField(vh, "S2");
+            if (secondary != null) {
+                secondary.setText(number);
+                secondary.setVisibility(View.VISIBLE);
+            }
+        } catch (Throwable t) {
+            debug("secondary number line failed: " + t);
+        }
+
+        debug("Recents: title <- CNAP '" + cnap + "' (call " + callId + ", number " + mask(number) + ")");
+    }
+
+    /** call_log.name of one row, if it is a real name (not empty, not just the number). */
+    private static String lookupStoredCnap(Context ctx, long callId, String number) {
+        if (ctx == null || callId <= 0) return null;
+
+        String cached = NAME_CACHE.get(callId);
+        if (cached != null) return cached;
+
+        Cursor c = null;
+        try {
+            c = ctx.getContentResolver().query(
+                    CallLog.Calls.CONTENT_URI,
+                    new String[]{CallLog.Calls.CACHED_NAME},
+                    CallLog.Calls._ID + "=?",
+                    new String[]{String.valueOf(callId)},
+                    null);
+
+            if (c != null && c.moveToFirst()) {
+                String name = sanitizeCnap(c.getString(0));
+                if (name != null && !digits(name).equals(digits(number))) {
+                    NAME_CACHE.put(callId, name);
+                    return name;
+                }
+            }
+        } catch (Throwable t) {
+            log("call_log name lookup failed: " + t);
+        } finally {
+            if (c != null) c.close();
+        }
+        return null;
     }
 
     // ------------------------------------------------------------------------------------------
