@@ -1,13 +1,21 @@
 package com.dhangofa.xiaomicnapfix;
 
+import android.content.BroadcastReceiver;
+import android.content.ContentValues;
 import android.content.Context;
+import android.content.Intent;
+import android.content.IntentFilter;
 import android.database.Cursor;
+import android.os.Build;
 import android.provider.CallLog;
 import android.text.TextUtils;
 import android.util.LruCache;
 import android.view.View;
 import android.widget.TextView;
 
+import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -47,6 +55,14 @@ public class CnapFixHook implements IXposedHookLoadPackage {
     private static final String CLS_ENTRY = "com.android.incallui.ContactInfoCache$ContactCacheEntry";
     private static final String CLS_CARD_INFO = "com.android.incallui.model.CallCardInfo";
 
+    // Call-log provider (Telecom's insert goes through it; it holds WRITE_CALL_LOG, InCallUI does not)
+    private static final String PKG_CALL_LOG_PROVIDER = "com.android.providers.contacts";
+    private static final String CLS_CALL_LOG_PROVIDER =
+            "com.android.providers.contacts.CallLogProvider";
+    private static final String ACTION_CNAP_READY = "com.dhangofa.xiaomicnapfix.action.CNAP_READY";
+    private static final String EXTRA_NUMBER = "com.dhangofa.xiaomicnapfix.extra.NUMBER";
+    private static final String EXTRA_CNAP = "com.dhangofa.xiaomicnapfix.extra.CNAP";
+
     // Xiaomi Phone/Contacts app: Recents list row (com.android.contacts, dump of this build)
     private static final String PKG_CONTACTS = "com.android.contacts";
     private static final String CLS_CALL_VH = "com.android.contacts.dialer.list.VH.DialerCallVH";
@@ -75,6 +91,11 @@ public class CnapFixHook implements IXposedHookLoadPackage {
                     + " (process " + lpparam.processName + ")");
 
             hookRecentsTitle(lpparam);
+        } else if (PKG_CALL_LOG_PROVIDER.equals(lpparam.packageName)) {
+            log("loaded into " + lpparam.packageName
+                    + " (process " + lpparam.processName + ")");
+
+            hookCallLogProvider(lpparam);
         }
     }
 
@@ -102,14 +123,6 @@ public class CnapFixHook implements IXposedHookLoadPackage {
                                 String callId = (String) param.args[1];
 
                                 if (entry == null || callId == null) {
-                                    return;
-                                }
-
-                                // A real name (contact, CNAP already applied, presentation string...) wins.
-                                String existingName =
-                                        (String) XposedHelpers.getObjectField(entry, "name");
-
-                                if (!TextUtils.isEmpty(existingName)) {
                                     return;
                                 }
 
@@ -145,20 +158,21 @@ public class CnapFixHook implements IXposedHookLoadPackage {
                                     return;
                                 }
 
-                                XposedHelpers.setObjectField(
-                                        entry,
-                                        "name",
-                                        cnap
-                                );
+                                // On-screen name: only fill an empty one (a real name wins).
+                                String existingName =
+                                        (String) XposedHelpers.getObjectField(entry, "name");
+                                boolean nameWasEmpty = TextUtils.isEmpty(existingName);
 
-                                String number =
-                                        (String) XposedHelpers.getObjectField(
-                                                entry,
-                                                "number"
-                                        );
+                                if (nameWasEmpty) {
+                                    XposedHelpers.setObjectField(entry, "name", cnap);
+                                }
 
-                                debug("buildEntry: entry.name <- CNAP '" + cnap
-                                        + "' (number " + mask(number) + ")");
+                                // Call history: remember it so the new call-log row gets the name.
+                                String number = (String) XposedHelpers.callMethod(call, "getNumber");
+                                sendCnap((Context) param.args[0], number, cnap);
+
+                                debug("buildEntry: CNAP '" + cnap + "' nameWasEmpty=" + nameWasEmpty
+                                        + " (number " + mask(number) + ")");
 
                             } catch (Throwable t) {
                                 log("buildEntry hook error: " + t);
@@ -407,6 +421,214 @@ public class CnapFixHook implements IXposedHookLoadPackage {
     }
 
     // ------------------------------------------------------------------------------------------
+    // Call-history write path.
+    //
+    // InCallUI (only READ_CALL_LOG) cannot write the call log, so it tells the call-log provider
+    // process (broadcast) which CNAP name belongs to which number. The provider process hook then
+    // sets cached_name on Telecom's insert, only when Telecom did not supply a name itself.
+    // ------------------------------------------------------------------------------------------
+    private static final class Pending {
+        final String cnap;
+        final long created;
+
+        Pending(String cnap, long created) {
+            this.cnap = cnap;
+            this.created = created;
+        }
+    }
+
+    private static final long PENDING_TTL_MS = 4L * 60 * 60 * 1000;
+    private static final long RESEND_MS = 20L * 1000;
+
+    /** key = last 10 digits of the number. */
+    private static final ConcurrentHashMap<String, Pending> PENDING =
+            new ConcurrentHashMap<String, Pending>();
+    private static final ConcurrentHashMap<String, Long> LAST_SENT =
+            new ConcurrentHashMap<String, Long>();
+    private static volatile boolean providerReceiverRegistered;
+
+    private static String tail(String number) {
+        String d = digits(number).replace("+", "");
+        return d.length() > 10 ? d.substring(d.length() - 10) : d;
+    }
+
+    // ---- InCallUI side ------------------------------------------------------------------------
+    private static void sendCnap(Context ctx, String number, String cnap) {
+        if (ctx == null || TextUtils.isEmpty(number) || TextUtils.isEmpty(cnap)) return;
+
+        String key = tail(number);
+        if (key.isEmpty()) return;
+
+        long now = System.currentTimeMillis();
+        Long last = LAST_SENT.get(key + "|" + cnap);
+        if (last != null && now - last < RESEND_MS) return; // buildEntry runs several times per call
+        LAST_SENT.put(key + "|" + cnap, now);
+
+        Intent intent = new Intent(ACTION_CNAP_READY);
+        intent.setPackage(PKG_CALL_LOG_PROVIDER);
+        intent.putExtra(EXTRA_NUMBER, number);
+        intent.putExtra(EXTRA_CNAP, cnap);
+        ctx.sendBroadcast(intent);
+
+        debug("sent CNAP to call-log provider, number=" + mask(number));
+    }
+
+    // ---- call-log provider side ---------------------------------------------------------------
+    private void hookCallLogProvider(final LoadPackageParam lpparam) {
+        try {
+            Class<?> providerClass = XposedHelpers.findClass(
+                    CLS_CALL_LOG_PROVIDER, lpparam.classLoader);
+
+            XposedBridge.hookAllMethods(providerClass, "onCreate", new XC_MethodHook() {
+                @Override
+                protected void afterHookedMethod(MethodHookParam param) {
+                    try {
+                        registerProviderReceiver(
+                                (Context) XposedHelpers.callMethod(param.thisObject, "getContext"));
+                    } catch (Throwable t) {
+                        log("CallLogProvider.onCreate hook error: " + t);
+                    }
+                }
+            });
+
+            hookProviderWriters(providerClass);
+            log("installed call-log provider hooks");
+        } catch (Throwable t) {
+            log("FAILED to hook CallLogProvider: " + t);
+        }
+    }
+
+    private static synchronized void registerProviderReceiver(Context context) {
+        if (providerReceiverRegistered || context == null) return;
+
+        final Context app = context.getApplicationContext() != null
+                ? context.getApplicationContext() : context;
+
+        BroadcastReceiver receiver = new BroadcastReceiver() {
+            @Override
+            public void onReceive(Context c, Intent intent) {
+                try {
+                    if (intent == null || !ACTION_CNAP_READY.equals(intent.getAction())) return;
+
+                    // Android 14+: accept only the InCallUI package as sender (best effort).
+                    if (Build.VERSION.SDK_INT >= 34) {
+                        try {
+                            int from = (Integer) XposedHelpers.callMethod(this, "getSentFromUid");
+                            int expected = app.getPackageManager().getPackageUid(PKG, 0);
+                            if (from != -1 && from != expected) {
+                                debug("ignored CNAP broadcast from uid " + from);
+                                return;
+                            }
+                        } catch (Throwable ignored) {
+                            // cannot verify: accept
+                        }
+                    }
+
+                    String number = intent.getStringExtra(EXTRA_NUMBER);
+                    String cnap = sanitizeCnap(intent.getStringExtra(EXTRA_CNAP));
+                    String key = tail(number);
+
+                    if (key.isEmpty() || cnap == null || digits(cnap).equals(digits(number))) return;
+
+                    Pending old = PENDING.get(key);
+                    PENDING.put(key, new Pending(cnap,
+                            old != null ? old.created : System.currentTimeMillis()));
+
+                    debug("provider cached CNAP for " + mask(number));
+                } catch (Throwable t) {
+                    log("provider receiver error: " + t);
+                }
+            }
+        };
+
+        IntentFilter filter = new IntentFilter(ACTION_CNAP_READY);
+        if (Build.VERSION.SDK_INT >= 33) {
+            app.registerReceiver(receiver, filter, Context.RECEIVER_EXPORTED);
+        } else {
+            app.registerReceiver(receiver, filter);
+        }
+
+        providerReceiverRegistered = true;
+        log("registered call-log provider CNAP receiver");
+    }
+
+    /** Hook only CallLogProvider's own, non-abstract writers (never framework ContentProvider). */
+    private void hookProviderWriters(Class<?> providerClass) {
+        boolean hooked = false;
+        StringBuilder seen = new StringBuilder();
+
+        for (final Method m : providerClass.getDeclaredMethods()) {
+            String n = m.getName();
+            if (!n.equals("insert") && !n.equals("insertInTransaction") && !n.equals("bulkInsert")) {
+                continue;
+            }
+            seen.append(n).append(' ');
+            if (Modifier.isAbstract(m.getModifiers())) continue;
+
+            try {
+                XposedBridge.hookMethod(m, new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param) {
+                        try {
+                            injectPendingCnap(findContentValues(param.args));
+                        } catch (Throwable t) {
+                            log(m.getName() + " hook error: " + t);
+                        }
+                    }
+                });
+                hooked = true;
+                log("hooked call-log writer: " + n);
+            } catch (Throwable t) {
+                log("FAILED to hook call-log writer " + n + ": " + t);
+            }
+        }
+
+        if (!hooked) log("no call-log writer hooked; saw: [" + seen + "]");
+    }
+
+    private static ContentValues findContentValues(Object[] args) {
+        if (args == null) return null;
+        for (Object arg : args) {
+            if (arg instanceof ContentValues) return (ContentValues) arg;
+        }
+        return null;
+    }
+
+    private static void injectPendingCnap(ContentValues values) {
+        if (values == null) return;
+
+        String number = values.getAsString(CallLog.Calls.NUMBER);
+        Integer type = values.getAsInteger(CallLog.Calls.TYPE);
+        String key = tail(number);
+
+        debug("call-log insert seen: number=" + mask(number) + ", type=" + type
+                + ", pending=" + PENDING.size());
+
+        if (key.isEmpty() || type == null) return;
+        // incoming (1), missed (3), rejected (5)
+        if (type != 1 && type != 3 && type != 5) return;
+
+        Pending p = PENDING.get(key);
+        if (p == null) return;
+
+        if (System.currentTimeMillis() - p.created > PENDING_TTL_MS) {
+            PENDING.remove(key);
+            return;
+        }
+
+        if (!TextUtils.isEmpty(values.getAsString(CallLog.Calls.CACHED_NAME))) {
+            debug("call-log insert already has a name for " + mask(number));
+            PENDING.remove(key);
+            return;
+        }
+
+        values.put(CallLog.Calls.CACHED_NAME, p.cnap);
+        PENDING.remove(key);
+        debug("call-log cached_name <- CNAP '" + p.cnap + "' (number " + mask(number)
+                + ", type " + type + ")");
+    }
+
+    // ------------------------------------------------------------------------------------------
     // Helpers
     // ------------------------------------------------------------------------------------------
 
@@ -533,3 +755,4 @@ public class CnapFixHook implements IXposedHookLoadPackage {
         }
     }
 }
+    
