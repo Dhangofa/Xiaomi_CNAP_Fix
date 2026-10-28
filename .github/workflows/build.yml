@@ -1,5 +1,5 @@
 name: Test Build
-run-name: ${{ needs.setup.outputs.title }}
+run-name: ${{ github.event.head_commit.message || github.ref_name }}
 
 on:
   push:
@@ -8,23 +8,7 @@ on:
   workflow_dispatch:
 
 jobs:
-  setup:
-    runs-on: ubuntu-latest
-    outputs:
-      title: ${{ steps.get_title.outputs.title }}
-    steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
-
-      - name: Extract Commit Title Only
-        id: get_title
-        run: |
-          # %s isolates strictly the first line (commit subject)
-          SUBJECT=$(git log -1 --pretty=format:'%s')
-          echo "title=$SUBJECT" >> "$GITHUB_OUTPUT"
-
   build:
-    needs: setup
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Code
