@@ -1,5 +1,11 @@
 name: Dev Test Build
-run-name: ${{ github.event.head_commit.message || github.sha }}
+run-name: ${{ github.event.head_commit.message }}
+
+on:
+  push:
+    paths:
+      - 'app/src/main/java/com/dhangofa/xiaomicnapfix/CnapFixHook.java'
+  workflow_dispatch:
 
 on:
   workflow_dispatch:
