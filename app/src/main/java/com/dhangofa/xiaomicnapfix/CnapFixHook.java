@@ -3,8 +3,10 @@ package com.dhangofa.xiaomicnapfix;
 import android.content.BroadcastReceiver;
 import android.content.ContentValues;
 import android.content.Context;
+import android.content.ContentProvider;
 import android.content.Intent;
 import android.content.IntentFilter;
+import android.content.pm.ProviderInfo;
 import android.database.Cursor;
 import android.os.Build;
 import android.provider.CallLog;
@@ -59,6 +61,7 @@ public class CnapFixHook implements IXposedHookLoadPackage {
     private static final String PKG_CALL_LOG_PROVIDER = "com.android.providers.contacts";
     private static final String CLS_CALL_LOG_PROVIDER =
             "com.android.providers.contacts.CallLogProvider";
+    private static final String PROCESS_ACORE = "android.process.acore"; // shared by several providers
     private static final String ACTION_CNAP_READY = "com.dhangofa.xiaomicnapfix.action.CNAP_READY";
     private static final String EXTRA_NUMBER = "com.dhangofa.xiaomicnapfix.extra.NUMBER";
     private static final String EXTRA_CNAP = "com.dhangofa.xiaomicnapfix.extra.CNAP";
@@ -91,11 +94,16 @@ public class CnapFixHook implements IXposedHookLoadPackage {
                     + " (process " + lpparam.processName + ")");
 
             hookRecentsTitle(lpparam);
-        } else if (PKG_CALL_LOG_PROVIDER.equals(lpparam.packageName)) {
+        } else if (PKG_CALL_LOG_PROVIDER.equals(lpparam.packageName)
+                || PROCESS_ACORE.equals(lpparam.processName)) {
+            // Several providers (contacts, calendar, user dictionary ...) share android.process.acore,
+            // so LSPosed may report another package for that process. Log it, and hook the provider
+            // when Android attaches it instead of relying on the package name.
             log("loaded into " + lpparam.packageName
-                    + " (process " + lpparam.processName + ")");
+                    + " (process " + lpparam.processName + ", first=" + lpparam.isFirstApplication + ")");
 
             hookCallLogProvider(lpparam);
+            hookProviderAttach();
         }
     }
 
@@ -474,28 +482,70 @@ public class CnapFixHook implements IXposedHookLoadPackage {
     }
 
     // ---- call-log provider side ---------------------------------------------------------------
+    private static volatile boolean providerHooksInstalled;
+    private static volatile boolean attachHooked;
+
+    /** Package-based path: works when LSPosed reports com.android.providers.contacts itself. */
     private void hookCallLogProvider(final LoadPackageParam lpparam) {
         try {
-            Class<?> providerClass = XposedHelpers.findClass(
+            Class<?> providerClass = XposedHelpers.findClassIfExists(
                     CLS_CALL_LOG_PROVIDER, lpparam.classLoader);
-
-            XposedBridge.hookAllMethods(providerClass, "onCreate", new XC_MethodHook() {
-                @Override
-                protected void afterHookedMethod(MethodHookParam param) {
-                    try {
-                        registerProviderReceiver(
-                                (Context) XposedHelpers.callMethod(param.thisObject, "getContext"));
-                    } catch (Throwable t) {
-                        log("CallLogProvider.onCreate hook error: " + t);
-                    }
-                }
-            });
-
-            hookProviderWriters(providerClass);
-            log("installed call-log provider hooks");
+            if (providerClass == null) {
+                debug("CallLogProvider not in classloader of " + lpparam.packageName);
+                return;
+            }
+            installProviderHooks(providerClass);
         } catch (Throwable t) {
             log("FAILED to hook CallLogProvider: " + t);
         }
+    }
+
+    /** Process-based path: hook ContentProvider.attachInfo and pick out CallLogProvider. */
+    private synchronized void hookProviderAttach() {
+        if (attachHooked) return;
+        try {
+            XposedHelpers.findAndHookMethod(
+                    ContentProvider.class, "attachInfo", Context.class, ProviderInfo.class,
+                    new XC_MethodHook() {
+                        @Override
+                        protected void afterHookedMethod(MethodHookParam param) {
+                            try {
+                                ProviderInfo info = (ProviderInfo) param.args[1];
+                                if (info == null || !CLS_CALL_LOG_PROVIDER.equals(info.name)) return;
+
+                                log("CallLogProvider attached (authority " + info.authority + ")");
+                                installProviderHooks(param.thisObject.getClass());
+                                registerProviderReceiver((Context) param.args[0]);
+                            } catch (Throwable t) {
+                                log("attachInfo hook error: " + t);
+                            }
+                        }
+                    });
+            attachHooked = true;
+            log("hooked ContentProvider.attachInfo");
+        } catch (Throwable t) {
+            log("FAILED to hook ContentProvider.attachInfo: " + t);
+        }
+    }
+
+    private synchronized void installProviderHooks(Class<?> providerClass) {
+        if (providerHooksInstalled) return;
+        providerHooksInstalled = true;
+
+        XposedBridge.hookAllMethods(providerClass, "onCreate", new XC_MethodHook() {
+            @Override
+            protected void afterHookedMethod(MethodHookParam param) {
+                try {
+                    registerProviderReceiver(
+                            (Context) XposedHelpers.callMethod(param.thisObject, "getContext"));
+                } catch (Throwable t) {
+                    log("CallLogProvider.onCreate hook error: " + t);
+                }
+            }
+        });
+
+        hookProviderWriters(providerClass);
+        log("installed call-log provider hooks on " + providerClass.getName());
     }
 
     private static synchronized void registerProviderReceiver(Context context) {
@@ -755,4 +805,4 @@ public class CnapFixHook implements IXposedHookLoadPackage {
         }
     }
 }
-    
+                                
