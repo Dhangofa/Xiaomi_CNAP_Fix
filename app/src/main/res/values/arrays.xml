@@ -3,6 +3,6 @@
     <string-array name="xposed_scope">
         <item>com.android.incallui</item>
         <item>com.android.contacts</item>
-        <item>system</item>
+        <item>android</item>
     </string-array>
 </resources>
