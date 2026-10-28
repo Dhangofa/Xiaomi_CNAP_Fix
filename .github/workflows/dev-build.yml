@@ -7,9 +7,6 @@ on:
       - 'app/src/main/java/com/dhangofa/xiaomicnapfix/CnapFixHook.java'
   workflow_dispatch:
 
-on:
-  workflow_dispatch:
-
 jobs:
   build:
     runs-on: ubuntu-latest
