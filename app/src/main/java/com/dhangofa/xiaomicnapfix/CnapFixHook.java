@@ -8,6 +8,7 @@ import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.pm.ProviderInfo;
 import android.database.Cursor;
+import android.net.Uri;
 import android.os.Build;
 import android.provider.CallLog;
 import android.text.TextUtils;
@@ -61,6 +62,11 @@ public class CnapFixHook implements IXposedHookLoadPackage {
     private static final String PKG_CALL_LOG_PROVIDER = "com.android.providers.contacts";
     private static final String CLS_CALL_LOG_PROVIDER =
             "com.android.providers.contacts.CallLogProvider";
+    // Telecom (runs inside the system process, uid 1000, holds the call-log permissions)
+    private static final String PKG_TELECOM = "com.android.server.telecom";
+    private static final String CLS_LOG_TASK =
+            "com.android.server.telecom.CallLogManager$LogCallAsyncTask";
+
     private static final String PROCESS_ACORE = "android.process.acore"; // shared by several providers
     private static final String ACTION_CNAP_READY = "com.dhangofa.xiaomicnapfix.action.CNAP_READY";
     private static final String EXTRA_NUMBER = "com.dhangofa.xiaomicnapfix.extra.NUMBER";
@@ -94,6 +100,13 @@ public class CnapFixHook implements IXposedHookLoadPackage {
                     + " (process " + lpparam.processName + ")");
 
             hookRecentsTitle(lpparam);
+        } else if (PKG_TELECOM.equals(lpparam.packageName)) {
+            log("loaded into " + lpparam.packageName
+                    + " (process " + lpparam.processName + ")");
+
+            hookTelecomCallLog(lpparam);
+        } else if ("android".equals(lpparam.packageName)) {
+            log("system framework scope active (process " + lpparam.processName + ")");
         } else if (PKG_CALL_LOG_PROVIDER.equals(lpparam.packageName)
                 || PROCESS_ACORE.equals(lpparam.processName)) {
             // Several providers (contacts, calendar, user dictionary ...) share android.process.acore,
@@ -679,6 +692,113 @@ public class CnapFixHook implements IXposedHookLoadPackage {
     }
 
     // ------------------------------------------------------------------------------------------
+    // Hook 4 (Telecom, system process): stamp the CNAP name onto the call-log row it just inserted.
+    //
+    // CallLogManager$LogCallAsyncTask.doInBackground(AddCallArgs[]) -> Uri[]: on MIUI builds the row
+    // is inserted by MiTelecommStub.addCall(Context, AddCallParams, Call), otherwise by
+    // CallLog.Calls.addCall. AddCallArgs.call is the Telecom Call, whose getCallerDisplayName() is
+    // the CNAP name. Telecom can write the call log itself, so no other process is involved.
+    // ------------------------------------------------------------------------------------------
+    private void hookTelecomCallLog(final LoadPackageParam lpparam) {
+        try {
+            Class<?> task = XposedHelpers.findClassIfExists(CLS_LOG_TASK, lpparam.classLoader);
+            if (task == null) {
+                log("Telecom LogCallAsyncTask not found");
+                return;
+            }
+
+            boolean hooked = false;
+            for (Method m : task.getDeclaredMethods()) {
+                if (!m.getName().equals("doInBackground") || m.isBridge() || m.isSynthetic()) continue;
+
+                XposedBridge.hookMethod(m, new XC_MethodHook() {
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) {
+                        try {
+                            stampCnapOnLoggedCalls(param.args, param.getResult());
+                        } catch (Throwable t) {
+                            log("Telecom doInBackground hook error: " + t);
+                        }
+                    }
+                });
+                hooked = true;
+                log("hooked Telecom CallLogManager.LogCallAsyncTask.doInBackground");
+            }
+
+            if (!hooked) log("Telecom: no doInBackground method found to hook");
+        } catch (Throwable t) {
+            log("FAILED to hook Telecom call logging: " + t);
+        }
+    }
+
+    private static void stampCnapOnLoggedCalls(Object[] hookArgs, Object result) {
+        if (hookArgs == null || hookArgs.length == 0 || !(hookArgs[0] instanceof Object[])
+                || !(result instanceof Object[])) {
+            return;
+        }
+
+        Object[] callArgs = (Object[]) hookArgs[0];
+        Object[] uris = (Object[]) result;
+
+        for (int i = 0; i < callArgs.length && i < uris.length; i++) {
+            Object args = callArgs[i];
+            Object uri = uris[i];
+            if (args == null || uri == null) continue;
+
+            Context ctx = (Context) XposedHelpers.getObjectField(args, "context");
+            Object telecomCall = XposedHelpers.getObjectField(args, "call");
+            if (ctx == null || telecomCall == null) continue;
+
+            String cnap = sanitizeCnap((String) XposedHelpers.callMethod(telecomCall, "getCallerDisplayName"));
+            if (cnap == null) continue;
+
+            int presentation = (Integer) XposedHelpers.callMethod(
+                    telecomCall, "getCallerDisplayNamePresentation");
+            if (presentation == PRESENTATION_RESTRICTED) continue;
+
+            stampRow(ctx, (Uri) uri, cnap);
+        }
+    }
+
+    private static void stampRow(Context ctx, Uri rowUri, String cnap) {
+        Cursor c = null;
+        try {
+            c = ctx.getContentResolver().query(
+                    rowUri,
+                    new String[]{CallLog.Calls.CACHED_NAME, CallLog.Calls.TYPE, CallLog.Calls.NUMBER},
+                    null, null, null);
+
+            if (c == null || !c.moveToFirst()) {
+                debug("Telecom: inserted row not readable: " + rowUri);
+                return;
+            }
+
+            String existing = c.getString(0);
+            int type = c.getInt(1);
+            String number = c.getString(2);
+
+            // Contacts (or anything Telecom already named) win; CNAP only matters for incoming calls.
+            if (!TextUtils.isEmpty(existing)) {
+                debug("Telecom: row " + rowUri + " already named, skipping");
+                return;
+            }
+            if (type != 1 && type != 3 && type != 5) return;
+            if (digits(cnap).equals(digits(number))) return;
+
+            ContentValues values = new ContentValues();
+            values.put(CallLog.Calls.CACHED_NAME, cnap);
+            int updated = ctx.getContentResolver().update(rowUri, values, null, null);
+
+            debug("Telecom: call-log row " + rowUri + " named '" + cnap + "' (updated " + updated
+                    + ", number " + mask(number) + ", type " + type + ")");
+        } catch (Throwable t) {
+            log("Telecom: stamping call-log row failed: " + t);
+        } finally {
+            if (c != null) c.close();
+        }
+    }
+
+    // ------------------------------------------------------------------------------------------
     // Helpers
     // ------------------------------------------------------------------------------------------
 
@@ -804,5 +924,4 @@ public class CnapFixHook implements IXposedHookLoadPackage {
             XposedBridge.log(TAG + message);
         }
     }
-}
-                                
+    }
