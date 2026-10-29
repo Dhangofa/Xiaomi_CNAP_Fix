@@ -6,11 +6,12 @@ import android.database.Cursor;
 import android.net.Uri;
 import android.provider.CallLog;
 import android.text.TextUtils;
-import android.util.LruCache;
 import android.view.View;
 import android.widget.TextView;
 
+import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -40,7 +41,7 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage.LoadPackageParam;
     public class CnapFixHook implements IXposedHookLoadPackage {
 
     private static final String TAG = "XiaomiCNAPFix: ";
-    private static final boolean DEBUG = true;   // set false once it works (logs are masked, but still noisy)
+    private static final boolean DEBUG = false;  // true = verbose logs (masked numbers); costs I/O, keep off
 
     private static final String PKG = "com.android.incallui";
     private static final String CLS_CALL = "com.android.incallui.Call";
@@ -66,8 +67,12 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage.LoadPackageParam;
 
     private static volatile int rejectLogBudget = 40;
 
-    /** call-log _id -> CNAP name stored in call_log.name (positive hits only). */
-    private static final LruCache<Long, String> NAME_CACHE = new LruCache<Long, String>(256);
+    /** call-log _id -> name stored in call_log.name; filled by ONE batched query, not per row. */
+    private static final ConcurrentHashMap<Long, String> NAMES = new ConcurrentHashMap<Long, String>();
+    private static volatile long lastNamesLoad;
+    private static volatile long highestCallIdBound;
+    private static final long NAMES_REFRESH_MS = 10L * 1000;  // at most one reload per 10 s of scrolling
+    private static final int NAMES_MAX_ROWS = 500;
 
     // android.telecom.TelecomManager.PRESENTATION_RESTRICTED
     private static final int PRESENTATION_RESTRICTED = 2;
@@ -314,50 +319,62 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage.LoadPackageParam;
         }
     }
 
-    private static void applyCnapToRecentsRow(Object vh, String number) {
-        if (vh == null || TextUtils.isEmpty(number)) return;
+    // Reflection handles are resolved once; this method runs for every row bind while scrolling.
+    private static Field fK3, fG3, fO2, fI2, fCallId, fKey;
+
+    private static synchronized void initVhFields(Object vh) {
+        if (fK3 != null) return;
+        Class<?> c = vh.getClass();
+        fG3 = XposedHelpers.findField(c, "g3");
+        fO2 = XposedHelpers.findField(c, "O2");
+        fI2 = XposedHelpers.findField(c, "I2");
+        fK3 = XposedHelpers.findField(c, "k3"); // set last: marks "ready"
+    }
+
+    private static synchronized void initVmFields(Object vm) {
+        if (fKey != null) return;
+        Class<?> c = vm.getClass();
+        fCallId = XposedHelpers.findField(c, "d");
+        fKey = XposedHelpers.findField(c, "e"); // set last: marks "ready"
+    }
+
+    private static void applyCnapToRecentsRow(Object vh, String number) throws Exception {
+        if (vh == null || number == null || number.isEmpty()) return;
+        if (fK3 == null) initVhFields(vh);
 
         // Number presentation must be allowed (otherwise the row shows "Private"/"Unknown").
-        if (!XposedHelpers.getBooleanField(vh, "k3")) {
-            reject("presentation not allowed", -1, -1, null, number);
-            return;
-        }
+        if (!fK3.getBoolean(vh)) return;
 
-        Object vm = XposedHelpers.getObjectField(vh, "g3");
+        Object vm = fG3.get(vh);
         if (vm == null) return;
+        if (fKey == null) initVmFields(vm);
 
-        long callId = XposedHelpers.getLongField(vm, "d");
-        long contactKey = XposedHelpers.getLongField(vm, "e");
+        // A real contact (or yellow-page hit) already has its own title. Most rows stop here.
+        long contactKey = fKey.getLong(vm);
+        if (contactKey > 0) return;
 
-        // A real contact (or yellow-page hit) already has its own title.
-        if (contactKey > 0) {
-            reject("contact key > 0", callId, contactKey, null, number);
-            return;
-        }
-
-        TextView title = (TextView) XposedHelpers.getObjectField(vh, "O2");
+        TextView title = (TextView) fO2.get(vh);
         if (title == null) return;
 
         // Missed calls: title is "<number> (<count>)". Keep the count, replace the number.
-        String shown = String.valueOf(title.getText());
+        CharSequence text = title.getText();
+        String shown = text == null ? "" : text.toString();
         String suffix = "";
-        Matcher m = COUNT_SUFFIX.matcher(shown);
-        if (m.find()) {
-            suffix = shown.substring(m.start());
-            shown = shown.substring(0, m.start());
+        if (shown.endsWith(")")) {
+            Matcher m = COUNT_SUFFIX.matcher(shown);
+            if (m.find()) {
+                suffix = shown.substring(m.start());
+                shown = shown.substring(0, m.start());
+            }
         }
 
         // Only replace a title that is just the number; tags, FDN names, "Unknown" etc. stay.
-        String numberDigits = digits(number);
-        if (numberDigits.isEmpty() || !numberDigits.equals(digits(shown))) {
-            reject("title is not the bare number", callId, contactKey, shown, number);
-            return;
-        }
+        if (!sameNumber(shown, number)) return;
 
-        Context ctx = (Context) XposedHelpers.getObjectField(vh, "I2");
-        String cnap = lookupStoredCnap(ctx, callId, number);
+        long callId = fCallId.getLong(vm);
+        String cnap = lookupStoredCnap((Context) fI2.get(vh), callId, number);
         if (cnap == null) {
-            reject("no stored name in call_log", callId, contactKey, shown, number);
+            if (DEBUG) reject("no stored name in call_log", callId, contactKey, shown, number);
             return;
         }
 
@@ -373,11 +390,13 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage.LoadPackageParam;
                 secondary.setVisibility(View.VISIBLE);
             }
         } catch (Throwable t) {
-            debug("secondary number line failed: " + t);
+            if (DEBUG) debug("secondary number line failed: " + t);
         }
 
-        debug("Recents: title <- CNAP '" + cnap + "'" + suffix + " (call " + callId
-                + ", number " + mask(number) + ")");
+        if (DEBUG) {
+            debug("Recents: title <- CNAP '" + cnap + "'" + suffix + " (call " + callId
+                    + ", number " + mask(number) + ")");
+        }
     }
 
     private static void reject(String reason, long callId, long contactKey, String shown, String number) {
@@ -387,35 +406,68 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage.LoadPackageParam;
                 + ", title '" + (shown == null ? "-" : mask(shown)) + "', number " + mask(number) + "]");
     }
 
-    /** call_log.name of one row, if it is a real name (not empty, not just the number). */
+    /** Allocation-free "same digits (and +) in the same order", ignoring spaces, dashes, brackets. */
+    private static boolean sameNumber(CharSequence a, CharSequence b) {
+        int i = 0, j = 0, na = a.length(), nb = b.length();
+        boolean any = false;
+        while (true) {
+            while (i < na && !isNumberChar(a.charAt(i))) i++;
+            while (j < nb && !isNumberChar(b.charAt(j))) j++;
+            if (i >= na || j >= nb) return any && i >= na && j >= nb;
+            if (a.charAt(i++) != b.charAt(j++)) return false;
+            any = true;
+        }
+    }
+
+    private static boolean isNumberChar(char c) {
+        return (c >= '0' && c <= '9') || c == '+';
+    }
+
+    /**
+     * Stored call_log.name of one row. Served from memory; the map is (re)filled by a single query
+     * when a row newer than any seen so far is bound, or at most once per NAMES_REFRESH_MS on a miss.
+     */
     private static String lookupStoredCnap(Context ctx, long callId, String number) {
         if (ctx == null || callId <= 0) return null;
 
-        String cached = NAME_CACHE.get(callId);
-        if (cached != null) return cached;
+        String name = NAMES.get(callId);
+
+        boolean newer = callId > highestCallIdBound;
+        if (newer) highestCallIdBound = callId;
+
+        long now = System.currentTimeMillis();
+        if (name == null && (newer || now - lastNamesLoad > NAMES_REFRESH_MS)) {
+            loadNames(ctx, now);
+            name = NAMES.get(callId);
+        }
+
+        if (name == null || sameNumber(name, number)) return null;
+        return name;
+    }
+
+    private static synchronized void loadNames(Context ctx, long now) {
+        lastNamesLoad = now;
+        if (NAMES.size() > 2000) NAMES.clear();
 
         Cursor c = null;
         try {
             c = ctx.getContentResolver().query(
                     CallLog.Calls.CONTENT_URI,
-                    new String[]{CallLog.Calls.CACHED_NAME},
-                    CallLog.Calls._ID + "=?",
-                    new String[]{String.valueOf(callId)},
-                    null);
+                    new String[]{CallLog.Calls._ID, CallLog.Calls.CACHED_NAME},
+                    CallLog.Calls.CACHED_NAME + " IS NOT NULL AND " + CallLog.Calls.CACHED_NAME + " != ''",
+                    null,
+                    CallLog.Calls.DATE + " DESC");
 
-            if (c != null && c.moveToFirst()) {
-                String name = sanitizeCnap(c.getString(0));
-                if (name != null && !digits(name).equals(digits(number))) {
-                    NAME_CACHE.put(callId, name);
-                    return name;
-                }
+            int rows = 0;
+            while (c != null && c.moveToNext() && rows++ < NAMES_MAX_ROWS) {
+                String name = sanitizeCnap(c.getString(1));
+                if (name != null) NAMES.put(c.getLong(0), name);
             }
         } catch (Throwable t) {
-            log("call_log name lookup failed: " + t);
+            log("call_log names load failed: " + t);
         } finally {
             if (c != null) c.close();
         }
-        return null;
     }
 
     // ------------------------------------------------------------------------------------------
@@ -449,7 +501,7 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage.LoadPackageParam;
                                 if (cnap == null) return;
 
                                 param.args[0] = cnap;
-                                debug("UnknownContact: title <- CNAP '" + cnap + "' (number "
+                                if (DEBUG) debug("UnknownContact: title <- CNAP '" + cnap + "' (number "
                                         + mask(number) + ")");
                             } catch (Throwable t) {
                                 log("UnknownContact hook error: " + t);
@@ -766,3 +818,4 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage.LoadPackageParam;
         }
     }
 }
+        
