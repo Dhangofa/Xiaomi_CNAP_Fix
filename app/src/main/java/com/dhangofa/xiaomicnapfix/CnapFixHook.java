@@ -57,6 +57,9 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage.LoadPackageParam;
     // Xiaomi Phone/Contacts app: Recents list row (com.android.contacts, dump of this build)
     private static final String PKG_CONTACTS = "com.android.contacts";
     private static final String CLS_CALL_VH = "com.android.contacts.dialer.list.VH.DialerCallVH";
+    private static final String CLS_UNKNOWN_ACTIVITY =
+            "com.android.contacts.activities.UnknownContactActivity";
+    private static final String CLS_STRANGER_UTIL = "com.android.contacts.util.StrangerNumberUtil";
 
     /** Missed-call rows get a repeat count appended to the title: "+91... (3)". */
     private static final Pattern COUNT_SUFFIX = Pattern.compile("\\s*\\(\\d+\\)\\s*$");
@@ -83,6 +86,7 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage.LoadPackageParam;
                     + " (process " + lpparam.processName + ")");
 
             hookRecentsTitle(lpparam);
+            hookUnknownContactTitle(lpparam);
 
         } else if (PKG_TELECOM.equals(lpparam.packageName)) {
             log("loaded into " + lpparam.packageName
@@ -415,6 +419,89 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage.LoadPackageParam;
     }
 
     // ------------------------------------------------------------------------------------------
+    // Hook 3b (com.android.contacts): header of the "Unknown contact" detail page.
+    //
+    // UnknownContactActivity.d(String name) is the only place that sets ContactDetailTitleView's title
+    // (and the collapsed toolbar title). With an empty name it picks the stranger/fraud labels, then the
+    // intent's "name" extra (j2), and finally the "Unknown contact" string. h2 = intent "number" extra.
+    // When there is no name, no label and no extra, we pass the stored CNAP name instead.
+    // (Obfuscated names h2/j2/d are valid for the dumped build only.)
+    // ------------------------------------------------------------------------------------------
+    private void hookUnknownContactTitle(final LoadPackageParam lpparam) {
+        try {
+            XposedHelpers.findAndHookMethod(
+                    CLS_UNKNOWN_ACTIVITY, lpparam.classLoader, "d", String.class,
+                    new XC_MethodHook() {
+                        @Override
+                        protected void beforeHookedMethod(MethodHookParam param) {
+                            try {
+                                if (!TextUtils.isEmpty((String) param.args[0])) return;
+
+                                Object activity = param.thisObject;
+                                String number = (String) XposedHelpers.getObjectField(activity, "h2");
+                                String intentName = (String) XposedHelpers.getObjectField(activity, "j2");
+                                if (TextUtils.isEmpty(number) || !TextUtils.isEmpty(intentName)) return;
+
+                                // Spam / fraud / stranger labels keep priority over a name.
+                                if (isStrangerLabelled(lpparam.classLoader, number)) return;
+
+                                String cnap = lookupCnapForNumber((Context) activity, number);
+                                if (cnap == null) return;
+
+                                param.args[0] = cnap;
+                                debug("UnknownContact: title <- CNAP '" + cnap + "' (number "
+                                        + mask(number) + ")");
+                            } catch (Throwable t) {
+                                log("UnknownContact hook error: " + t);
+                            }
+                        }
+                    });
+            log("hooked UnknownContactActivity.d(String)");
+        } catch (Throwable t) {
+            log("FAILED to hook UnknownContactActivity.d(String): " + t);
+        }
+    }
+
+    private static boolean isStrangerLabelled(ClassLoader cl, String number) {
+        try {
+            Class<?> util = XposedHelpers.findClassIfExists(CLS_STRANGER_UTIL, cl);
+            if (util == null) return false;
+            return Boolean.TRUE.equals(XposedHelpers.callStaticMethod(util, "a", number))
+                    || Boolean.TRUE.equals(XposedHelpers.callStaticMethod(util, "b", number));
+        } catch (Throwable t) {
+            debug("stranger label check failed: " + t);
+            return false;
+        }
+    }
+
+    /** Newest call-log row of this number that carries a real name (written by the Telecom hook). */
+    private static String lookupCnapForNumber(Context ctx, String number) {
+        String key = tail(number);
+        if (ctx == null || key.isEmpty()) return null;
+
+        Cursor c = null;
+        try {
+            c = ctx.getContentResolver().query(
+                    CallLog.Calls.CONTENT_URI,
+                    new String[]{CallLog.Calls.CACHED_NAME},
+                    CallLog.Calls.NUMBER + " LIKE ? AND " + CallLog.Calls.CACHED_NAME
+                            + " IS NOT NULL AND " + CallLog.Calls.CACHED_NAME + " != ''",
+                    new String[]{"%" + key},
+                    CallLog.Calls.DATE + " DESC");
+
+            if (c != null && c.moveToFirst()) {
+                String name = sanitizeCnap(c.getString(0));
+                if (name != null && !digits(name).equals(digits(number))) return name;
+            }
+        } catch (Throwable t) {
+            log("call_log name lookup (number) failed: " + t);
+        } finally {
+            if (c != null) c.close();
+        }
+        return null;
+    }
+
+    // ------------------------------------------------------------------------------------------
     // Hook 4 (Telecom, system process): stamp the CNAP name onto the call-log row it just inserted.
     //
     // CallLogManager$LogCallAsyncTask.doInBackground(AddCallArgs[]) -> Uri[]: on MIUI builds the row
@@ -643,6 +730,12 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage.LoadPackageParam;
         return cnap.length() > 256
                 ? cnap.substring(0, 256)
                 : cnap;
+    }
+
+    /** Last 10 digits of a number, to match +91..., 0..., and bare formats in LIKE queries. */
+    private static String tail(String number) {
+        String d = digits(number).replace("+", "");
+        return d.length() > 10 ? d.substring(d.length() - 10) : d;
     }
 
     private static String digits(String value) {
