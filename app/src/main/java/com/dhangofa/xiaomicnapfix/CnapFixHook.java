@@ -4,16 +4,22 @@ import android.content.ContentValues;
 import android.content.Context;
 import android.database.Cursor;
 import android.net.Uri;
+import android.os.Bundle;
 import android.provider.CallLog;
 import android.text.TextUtils;
+import android.app.Activity;
+import android.content.Intent;
 import android.view.View;
+import android.view.ViewGroup;
+import android.view.ViewParent;
 import android.widget.TextView;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 import de.robv.android.xposed.IXposedHookLoadPackage;
 import de.robv.android.xposed.XC_MethodHook;
@@ -60,18 +66,16 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage.LoadPackageParam;
     private static final String CLS_CALL_VH = "com.android.contacts.dialer.list.VH.DialerCallVH";
     private static final String CLS_UNKNOWN_ACTIVITY =
             "com.android.contacts.activities.UnknownContactActivity";
-    private static final String CLS_STRANGER_UTIL = "com.android.contacts.util.StrangerNumberUtil";
+    // Intent extra keys read by UnknownContactActivity.onCreate (public contract, not obfuscated).
+    private static final String EXTRA_NUMBER = "number";
+    private static final String EXTRA_NUMBER_ALT = "data1";
+    private static final String EXTRA_NAME = "name";
 
-    /** Missed-call rows get a repeat count appended to the title: "+91... (3)". */
-    private static final Pattern COUNT_SUFFIX = Pattern.compile("\\s*\\(\\d+\\)\\s*$");
-
-    private static volatile int rejectLogBudget = 40;
-
-    /** call-log _id -> name stored in call_log.name; filled by ONE batched query, not per row. */
-    private static final ConcurrentHashMap<Long, String> NAMES = new ConcurrentHashMap<Long, String>();
+    /** last-10-digits of a number -> newest name stored in call_log.name for it. */
+    private static final ConcurrentHashMap<String, String> NAMES =
+            new ConcurrentHashMap<String, String>();
     private static volatile long lastNamesLoad;
-    private static volatile long highestCallIdBound;
-    private static final long NAMES_REFRESH_MS = 10L * 1000;  // at most one reload per 10 s of scrolling
+    private static final long NAMES_REFRESH_MS = 5L * 1000;  // at most one reload per 5 s on a miss
     private static final int NAMES_MAX_ROWS = 500;
 
     // android.telecom.TelecomManager.PRESENTATION_RESTRICTED
@@ -287,123 +291,190 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage.LoadPackageParam;
     }
 
     // ------------------------------------------------------------------------------------------
-    // Hook 3 (com.android.contacts): Recents row title.
+    // Hook 3 (com.android.contacts): Recents row title - written to survive app updates.
     //
-    // DialerCallVH.c(String number) builds the row title. For a number without a contact
-    // (DialerItemVM.e <= 0, e = cursor column 1) it falls through to "append the raw number";
-    // call_log.name is never read (CalllogQuery / the T9 smart-dialer cursor have no such use).
-    // After c() ran we replace a bare-number title with the CNAP name stored in call_log.name
-    // for that call (DialerItemVM.d = call-log _id), and show the number on the secondary line.
-    //
-    // Obfuscated names below are valid for the dumped build only:
-    //   DialerCallVH.g3 = DialerItemVM, .O2 = title TextView, .S2 = number TextView (lazy, V()),
-    //   .I2 = Context, .k3 = number presentation allowed; DialerItemVM.d/e = long.
+    // The Contacts app is obfuscated: method and field names change with every build. So nothing here
+    // depends on them. What is used instead:
+    //   * the class name DialerCallVH and the *type* DialerItemVM (kept by the obfuscator);
+    //   * methods found by SHAPE: the bind method (first parameter is a DialerItemVM) and the
+    //     number-title setters ((String) -> void);
+    //   * the title is found in the row's view tree: the visible TextView with the biggest text size
+    //     (ties: first in layout order). A row of an unknown number shows the bare number there;
+    //     a contact row shows the contact's name, so it is left alone.
+    // If the shape is not found, one log line says so and the screen is simply left unchanged.
     // ------------------------------------------------------------------------------------------
     private void hookRecentsTitle(final LoadPackageParam lpparam) {
         try {
-            XposedHelpers.findAndHookMethod(
-                    CLS_CALL_VH, lpparam.classLoader, "c", String.class,
-                    new XC_MethodHook() {
-                        @Override
-                        protected void afterHookedMethod(MethodHookParam param) {
-                            try {
-                                applyCnapToRecentsRow(param.thisObject, (String) param.args[0]);
-                            } catch (Throwable t) {
-                                log("Recents hook error: " + t);
-                            }
-                        }
-                    });
-            log("hooked DialerCallVH.c(String)");
+            Class<?> vhClass = XposedHelpers.findClassIfExists(CLS_CALL_VH, lpparam.classLoader);
+            if (vhClass == null) {
+                log("Recents: DialerCallVH not found (Contacts app changed?)");
+                return;
+            }
+
+            XC_MethodHook callback = new XC_MethodHook() {
+                @Override
+                protected void afterHookedMethod(MethodHookParam param) {
+                    try {
+                        applyToRecentsRow(param.thisObject);
+                    } catch (Throwable t) {
+                        log("Recents hook error: " + t);
+                    }
+                }
+            };
+
+            int hooked = 0;
+            for (Method m : vhClass.getDeclaredMethods()) {
+                int mod = m.getModifiers();
+                if (m.isBridge() || m.isSynthetic() || Modifier.isStatic(mod) || Modifier.isAbstract(mod)
+                        || m.getReturnType() != void.class) {
+                    continue;
+                }
+                Class<?>[] p = m.getParameterTypes();
+                boolean bind = p.length > 0 && p[0].getName().endsWith(".DialerItemVM");
+                boolean numberSetter = p.length == 1 && p[0] == String.class;
+                if (!bind && !numberSetter) continue;
+
+                XposedBridge.hookMethod(m, callback);
+                hooked++;
+            }
+
+            if (hooked == 0) {
+                log("Recents: no row binder found in DialerCallVH (Contacts app changed?)");
+            } else {
+                log("hooked " + hooked + " DialerCallVH row binder method(s)");
+            }
         } catch (Throwable t) {
-            log("FAILED to hook DialerCallVH.c(String): " + t);
+            log("FAILED to hook Recents rows: " + t);
         }
     }
 
-    // Reflection handles are resolved once; this method runs for every row bind while scrolling.
-    private static Field fK3, fG3, fO2, fI2, fCallId, fKey;
+    private static final int MAX_ROW_VIEWS = 120;
+    private static final int MAX_ROW_ASCENT = 6;
 
-    private static synchronized void initVhFields(Object vh) {
-        if (fK3 != null) return;
-        Class<?> c = vh.getClass();
-        fG3 = XposedHelpers.findField(c, "g3");
-        fO2 = XposedHelpers.findField(c, "O2");
-        fI2 = XposedHelpers.findField(c, "I2");
-        fK3 = XposedHelpers.findField(c, "k3"); // set last: marks "ready"
-    }
+    private static void applyToRecentsRow(Object vh) {
+        if (vh == null) return;
 
-    private static synchronized void initVmFields(Object vm) {
-        if (fKey != null) return;
-        Class<?> c = vm.getClass();
-        fCallId = XposedHelpers.findField(c, "d");
-        fKey = XposedHelpers.findField(c, "e"); // set last: marks "ready"
-    }
+        TextView any = firstTextViewField(vh);
+        if (any == null) return;
 
-    private static void applyCnapToRecentsRow(Object vh, String number) throws Exception {
-        if (vh == null || number == null || number.isEmpty()) return;
-        if (fK3 == null) initVhFields(vh);
+        View root = rowRoot(any);
+        if (root == null) return;
 
-        // Number presentation must be allowed (otherwise the row shows "Private"/"Unknown").
-        if (!fK3.getBoolean(vh)) return;
-
-        Object vm = fG3.get(vh);
-        if (vm == null) return;
-        if (fKey == null) initVmFields(vm);
-
-        // A real contact (or yellow-page hit) already has its own title. Most rows stop here.
-        long contactKey = fKey.getLong(vm);
-        if (contactKey > 0) return;
-
-        TextView title = (TextView) fO2.get(vh);
+        TextView title = biggestVisibleText(root);
         if (title == null) return;
 
-        // Missed calls: title is "<number> (<count>)". Keep the count, replace the number.
-        CharSequence text = title.getText();
-        String shown = text == null ? "" : text.toString();
+        // Split "<number> (3)" (missed-call repeat count) into number and suffix.
+        String text = String.valueOf(title.getText()).trim();
         String suffix = "";
-        if (shown.endsWith(")")) {
-            Matcher m = COUNT_SUFFIX.matcher(shown);
-            if (m.find()) {
-                suffix = shown.substring(m.start());
-                shown = shown.substring(0, m.start());
+        int open = text.lastIndexOf('(');
+        if (open > 0 && text.endsWith(")") && allDigits(text, open + 1, text.length() - 1)) {
+            int cut = open;
+            while (cut > 0 && text.charAt(cut - 1) == ' ') cut--;
+            suffix = text.substring(cut);
+            text = text.substring(0, cut);
+        }
+
+        // Only a bare number is replaced: names, spam tags, "Unknown", "Private" etc. are left alone.
+        if (!looksLikeNumber(text)) return;
+
+        String name = lookupName(title.getContext(), text);
+        if (name == null) return;
+
+        title.setText(name + suffix);
+        title.setContentDescription(name + suffix);
+        showNumberLineIfKnown(vh, text);
+
+        if (DEBUG) debug("Recents: title <- CNAP '" + name + "'" + suffix + " (number " + mask(text) + ")");
+    }
+
+    // ---- row/view discovery (reflection handles cached per class) ------------------------------
+    private static Field[] textViewFields;
+
+    private static synchronized Field[] textViewFieldsOf(Class<?> c) {
+        if (textViewFields != null) return textViewFields;
+        java.util.ArrayList<Field> list = new java.util.ArrayList<Field>();
+        for (Class<?> k = c; k != null && k != Object.class; k = k.getSuperclass()) {
+            for (Field f : k.getDeclaredFields()) {
+                if (TextView.class.isAssignableFrom(f.getType()) && !Modifier.isStatic(f.getModifiers())) {
+                    f.setAccessible(true);
+                    list.add(f);
+                }
             }
         }
+        textViewFields = list.toArray(new Field[0]);
+        return textViewFields;
+    }
 
-        // Only replace a title that is just the number; tags, FDN names, "Unknown" etc. stay.
-        if (!sameNumber(shown, number)) return;
-
-        long callId = fCallId.getLong(vm);
-        String cnap = lookupStoredCnap((Context) fI2.get(vh), callId, number);
-        if (cnap == null) {
-            if (DEBUG) reject("no stored name in call_log", callId, contactKey, shown, number);
-            return;
-        }
-
-        title.setText(cnap + suffix);
-        title.setContentDescription(cnap + suffix);
-
-        // Number on the secondary line, like a normal contact row.
+    private static TextView firstTextViewField(Object vh) {
         try {
-            XposedHelpers.callMethod(vh, "V"); // inflates S2 if it is not there yet
-            TextView secondary = (TextView) XposedHelpers.getObjectField(vh, "S2");
-            if (secondary != null) {
-                secondary.setText(number);
-                secondary.setVisibility(View.VISIBLE);
+            for (Field f : textViewFieldsOf(vh.getClass())) {
+                Object v = f.get(vh);
+                if (v instanceof TextView) return (TextView) v;
             }
-        } catch (Throwable t) {
-            if (DEBUG) debug("secondary number line failed: " + t);
+        } catch (Throwable ignored) {
+            // fall through
         }
+        return null;
+    }
 
-        if (DEBUG) {
-            debug("Recents: title <- CNAP '" + cnap + "'" + suffix + " (call " + callId
-                    + ", number " + mask(number) + ")");
+    /**
+     * The row's own root view. A holder that is not attached yet has no parent; an attached one
+     * has the RecyclerView/ListView as parent. Anything else is not trusted (never touch other UI).
+     */
+    private static View rowRoot(View v) {
+        for (int depth = 0; depth < MAX_ROW_ASCENT; depth++) {
+            ViewParent parent = v.getParent();
+            if (parent == null) return v;
+            String cls = parent.getClass().getName();
+            if (cls.contains("RecyclerView") || cls.contains("ListView")) return v;
+            if (!(parent instanceof View)) return null;
+            v = (View) parent;
+        }
+        return null;
+    }
+
+    private static TextView biggestVisibleText(View root) {
+        int[] budget = {MAX_ROW_VIEWS};
+        TextView[] best = {null};
+        float[] bestSize = {-1f};
+        scan(root, budget, best, bestSize);
+        return budget[0] < 0 ? null : best[0]; // too many views: not a list row, do nothing
+    }
+
+    private static void scan(View v, int[] budget, TextView[] best, float[] bestSize) {
+        if (--budget[0] < 0 || v.getVisibility() != View.VISIBLE) return;
+
+        if (v instanceof TextView) {
+            TextView tv = (TextView) v;
+            if (tv.getText() != null && tv.getText().length() > 0 && tv.getTextSize() > bestSize[0]) {
+                best[0] = tv;
+                bestSize[0] = tv.getTextSize();
+            }
+        } else if (v instanceof ViewGroup) {
+            ViewGroup g = (ViewGroup) v;
+            for (int i = 0; i < g.getChildCount() && budget[0] >= 0; i++) scan(g.getChildAt(i), budget, best, bestSize);
         }
     }
 
-    private static void reject(String reason, long callId, long contactKey, String shown, String number) {
-        if (!DEBUG || rejectLogBudget <= 0) return;
-        rejectLogBudget--;
-        debug("Recents skip: " + reason + " [call " + callId + ", key " + contactKey
-                + ", title '" + (shown == null ? "-" : mask(shown)) + "', number " + mask(number) + "]");
+    // ---- text helpers (allocation-light) ---------------------------------------------------------
+    private static boolean allDigits(String s, int from, int to) {
+        if (from >= to) return false;
+        for (int i = from; i < to; i++) {
+            char c = s.charAt(i);
+            if (c < '0' || c > '9') return false;
+        }
+        return true;
+    }
+
+    /** "+91 86178 91191", "08617891191", "(0861) 789-1191": digits plus + space - ( ) . only, 5+ digits. */
+    private static boolean looksLikeNumber(String s) {
+        int digits = 0;
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (c >= '0' && c <= '9') digits++;
+            else if (c != '+' && c != ' ' && c != '-' && c != '(' && c != ')' && c != '.') return false;
+        }
+        return digits >= 5;
     }
 
     /** Allocation-free "same digits (and +) in the same order", ignoring spaces, dashes, brackets. */
@@ -423,22 +494,37 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage.LoadPackageParam;
         return (c >= '0' && c <= '9') || c == '+';
     }
 
+    // ---- optional number line (only where the tested build's helper names still exist) -----------
+    private static void showNumberLineIfKnown(Object vh, String number) {
+        try {
+            Field s2 = XposedHelpers.findFieldIfExists(vh.getClass(), "S2");
+            Method v = XposedHelpers.findMethodExactIfExists(vh.getClass(), "V");
+            if (s2 == null || v == null) return; // other build: the number stays on the detail page
+            v.invoke(vh); // inflates the secondary line if needed
+            Object tv = s2.get(vh);
+            if (tv instanceof TextView) {
+                ((TextView) tv).setText(number);
+                ((TextView) tv).setVisibility(View.VISIBLE);
+            }
+        } catch (Throwable ignored) {
+            // cosmetic only
+        }
+    }
+
+    // ---- name store ----------------------------------------------------------------------------
     /**
-     * Stored call_log.name of one row. Served from memory; the map is (re)filled by a single query
-     * when a row newer than any seen so far is bound, or at most once per NAMES_REFRESH_MS on a miss.
+     * Newest stored call_log.name for this number (matched on its last 10 digits). Served from memory;
+     * one batched query refills the map, at most once per NAMES_REFRESH_MS and only on a miss.
      */
-    private static String lookupStoredCnap(Context ctx, long callId, String number) {
-        if (ctx == null || callId <= 0) return null;
+    private static String lookupName(Context ctx, String number) {
+        String key = tail(number);
+        if (ctx == null || key.isEmpty()) return null;
 
-        String name = NAMES.get(callId);
-
-        boolean newer = callId > highestCallIdBound;
-        if (newer) highestCallIdBound = callId;
-
+        String name = NAMES.get(key);
         long now = System.currentTimeMillis();
-        if (name == null && (newer || now - lastNamesLoad > NAMES_REFRESH_MS)) {
+        if (name == null && now - lastNamesLoad > NAMES_REFRESH_MS) {
             loadNames(ctx, now);
-            name = NAMES.get(callId);
+            name = NAMES.get(key);
         }
 
         if (name == null || sameNumber(name, number)) return null;
@@ -447,110 +533,78 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage.LoadPackageParam;
 
     private static synchronized void loadNames(Context ctx, long now) {
         lastNamesLoad = now;
-        if (NAMES.size() > 2000) NAMES.clear();
 
+        Map<String, String> fresh = new HashMap<String, String>();
         Cursor c = null;
         try {
             c = ctx.getContentResolver().query(
                     CallLog.Calls.CONTENT_URI,
-                    new String[]{CallLog.Calls._ID, CallLog.Calls.CACHED_NAME},
+                    new String[]{CallLog.Calls.NUMBER, CallLog.Calls.CACHED_NAME},
                     CallLog.Calls.CACHED_NAME + " IS NOT NULL AND " + CallLog.Calls.CACHED_NAME + " != ''",
                     null,
                     CallLog.Calls.DATE + " DESC");
 
             int rows = 0;
             while (c != null && c.moveToNext() && rows++ < NAMES_MAX_ROWS) {
+                String key = tail(c.getString(0));
                 String name = sanitizeCnap(c.getString(1));
-                if (name != null) NAMES.put(c.getLong(0), name);
+                if (!key.isEmpty() && name != null && !fresh.containsKey(key)) fresh.put(key, name); // newest wins
             }
         } catch (Throwable t) {
             log("call_log names load failed: " + t);
+            return;
         } finally {
             if (c != null) c.close();
         }
+
+        NAMES.clear();
+        NAMES.putAll(fresh);
     }
 
     // ------------------------------------------------------------------------------------------
-    // Hook 3b (com.android.contacts): header of the "Unknown contact" detail page.
+    // Hook 3b (com.android.contacts): header of the "Unknown contact" detail page - via the intent.
     //
-    // UnknownContactActivity.d(String name) is the only place that sets ContactDetailTitleView's title
-    // (and the collapsed toolbar title). With an empty name it picks the stranger/fraud labels, then the
-    // intent's "name" extra (j2), and finally the "Unknown contact" string. h2 = intent "number" extra.
-    // When there is no name, no label and no extra, we pass the stored CNAP name instead.
-    // (Obfuscated names h2/j2/d are valid for the dumped build only.)
+    // UnknownContactActivity.onCreate reads the intent extras "number" and "name"; with an empty name
+    // it shows "Unknown contact". onCreate is a framework lifecycle method and the extra keys are the
+    // page's input contract, so neither is renamed by the obfuscator. Before onCreate runs we put the
+    // stored CNAP name into the "name" extra. (A spam/fraud label that would otherwise win over
+    // "Unknown contact" is then replaced by the name; the number line below is unchanged.)
     // ------------------------------------------------------------------------------------------
     private void hookUnknownContactTitle(final LoadPackageParam lpparam) {
         try {
             XposedHelpers.findAndHookMethod(
-                    CLS_UNKNOWN_ACTIVITY, lpparam.classLoader, "d", String.class,
+                    CLS_UNKNOWN_ACTIVITY, lpparam.classLoader, "onCreate", Bundle.class,
                     new XC_MethodHook() {
                         @Override
                         protected void beforeHookedMethod(MethodHookParam param) {
                             try {
-                                if (!TextUtils.isEmpty((String) param.args[0])) return;
+                                if (!CLS_UNKNOWN_ACTIVITY.equals(param.thisObject.getClass().getName())) return;
 
-                                Object activity = param.thisObject;
-                                String number = (String) XposedHelpers.getObjectField(activity, "h2");
-                                String intentName = (String) XposedHelpers.getObjectField(activity, "j2");
-                                if (TextUtils.isEmpty(number) || !TextUtils.isEmpty(intentName)) return;
+                                Activity activity = (Activity) param.thisObject;
+                                Intent intent = activity.getIntent();
+                                if (intent == null) return;
 
-                                // Spam / fraud / stranger labels keep priority over a name.
-                                if (isStrangerLabelled(lpparam.classLoader, number)) return;
+                                if (!TextUtils.isEmpty(intent.getStringExtra(EXTRA_NAME))) return;
 
-                                String cnap = lookupCnapForNumber((Context) activity, number);
-                                if (cnap == null) return;
+                                String number = intent.getStringExtra(EXTRA_NUMBER);
+                                if (TextUtils.isEmpty(number)) number = intent.getStringExtra(EXTRA_NUMBER_ALT);
+                                if (TextUtils.isEmpty(number)) return;
 
-                                param.args[0] = cnap;
-                                if (DEBUG) debug("UnknownContact: title <- CNAP '" + cnap + "' (number "
+                                String name = lookupName(activity, number);
+                                if (name == null) return;
+
+                                intent.putExtra(EXTRA_NAME, name);
+                                if (DEBUG) debug("UnknownContact: name extra <- CNAP '" + name + "' (number "
                                         + mask(number) + ")");
                             } catch (Throwable t) {
                                 log("UnknownContact hook error: " + t);
                             }
                         }
                     });
-            log("hooked UnknownContactActivity.d(String)");
+            log("hooked UnknownContactActivity.onCreate");
         } catch (Throwable t) {
-            log("FAILED to hook UnknownContactActivity.d(String): " + t);
+            log("FAILED to hook UnknownContactActivity.onCreate: " + t);
         }
-    }
-
-    private static boolean isStrangerLabelled(ClassLoader cl, String number) {
-        try {
-            Class<?> util = XposedHelpers.findClassIfExists(CLS_STRANGER_UTIL, cl);
-            if (util == null) return false;
-            return Boolean.TRUE.equals(XposedHelpers.callStaticMethod(util, "a", number))
-                    || Boolean.TRUE.equals(XposedHelpers.callStaticMethod(util, "b", number));
-        } catch (Throwable t) {
-            debug("stranger label check failed: " + t);
-            return false;
-        }
-    }
-
-    /** Newest call-log row of this number that carries a real name (written by the Telecom hook). */
-    private static String lookupCnapForNumber(Context ctx, String number) {
-        String key = tail(number);
-        if (ctx == null || key.isEmpty()) return null;
-
-        Cursor c = null;
-        try {
-            c = ctx.getContentResolver().query(
-                    CallLog.Calls.CONTENT_URI,
-                    new String[]{CallLog.Calls.CACHED_NAME},
-                    CallLog.Calls.NUMBER + " LIKE ? AND " + CallLog.Calls.CACHED_NAME
-                            + " IS NOT NULL AND " + CallLog.Calls.CACHED_NAME + " != ''",
-                    new String[]{"%" + key},
-                    CallLog.Calls.DATE + " DESC");
-
-            if (c != null && c.moveToFirst()) {
-                String name = sanitizeCnap(c.getString(0));
-                if (name != null && !digits(name).equals(digits(number))) return name;
-            }
-        } catch (Throwable t) {
-            log("call_log name lookup (number) failed: " + t);
-        } finally {
-            if (c != null) c.close();
-        }
-        return null;
     }
 
     // ------------------------------------------------------------------------------------------
@@ -818,4 +872,4 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage.LoadPackageParam;
         }
     }
 }
-        
+                                
