@@ -1,6 +1,6 @@
 # Xiaomi CNAP Fix
 
-An LSPosed module that makes the Xiaomi (MIUI) dialer show the **caller name sent by the network (CNAP)** for numbers that are not in your contacts, the same name Google Dialer shows.
+An LSPosed module that makes the Xiaomi (MIUI/HyperOS) dialer show the **caller name sent by the network (CNAP)** for numbers that are not in your contacts, the same name Google Dialer shows.
 
 On stock MIUI the network name is received by the phone but never displayed. The call screen, the notification, the call history and the detail page all fall back to the bare number. This module fixes that.
 
