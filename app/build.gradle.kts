@@ -10,7 +10,7 @@ android {
         applicationId = "io.github.dhangofa.xiaomicnapfix"
         minSdk = 28
         targetSdk = 37
-        versionCode = 18
+        versionCode = 19
         versionName = "1.0.2"
     }
     dependenciesInfo {
