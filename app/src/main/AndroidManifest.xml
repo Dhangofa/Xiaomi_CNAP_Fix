@@ -14,7 +14,7 @@
             android:value="true" />
         <meta-data
             android:name="xposeddescription"
-            android:value="Fixes missing network CNAP caller ID names on Xiaomi IncallUI." />
+            android:value="Fixes missing network CNAP caller ID names on Xiaomi Dialer and IncallUI." />
         <meta-data
             android:name="xposedminversion"
             android:value="82" />
