@@ -4,7 +4,7 @@ An LSPosed module that makes the Xiaomi (MIUI) dialer show the **caller name sen
 
 On stock MIUI the network name is received by the phone but never displayed. The call screen, the notification, the call history and the detail page all fall back to the bare number. This module fixes that.
 
-> **CNAP** (Calling Name Presentation) is a carrier service that sends the caller's registered name together with the incoming call. Currently Indian carrier sends caller's Aadhaar Registered name with incoming call.
+> **CNAP** (Calling Name Presentation) is a carrier service that sends the caller's registered name together with the incoming call.
 
 ---
 
@@ -12,7 +12,7 @@ On stock MIUI the network name is received by the phone but never displayed. The
 
 | Where | Before | After |
 |---|---|---|
-| Incoming call screen (full screen) | `+91 1234t6789` | `Caller Name` |
+| Incoming call screen (full screen) | `+91 88188 11111` | `Caller Name` |
 | Heads-up / notification | number | name |
 | Call history (Recents) | number | name, with the number on the second line |
 | "Unknown contact" detail page | `Unknown contact` | name |
@@ -30,12 +30,12 @@ Names are stored in the system call log's own name column, so they stay in your 
 |---|---|
 | Device | Xiaomi `ruby` |
 | ROM | MIUI 14, based on Android 13 |
-| Contacts and dialer (`com.android.contacts`) | 12.3.7.3 |
-| Phone / InCallUI (`com.android.incallui`) | 1.0.25 |
+| Contacts and dialer (`com.android.contacts`) | Multiple versions |
+| Phone / InCallUI (`com.android.incallui`) | Multiple versions |
 | Telecom (`com.android.server.telecom`) | 13 |
 | System Framework | 13 |
 
-> **Important:** the module hooks classes whose names are obfuscated in Xiaomi's apps (for example `DialerCallVH.c` and `UnknownContactActivity.d`). Those names change between app versions. **It is only known to work on the versions above.** On other versions a hook may fail to install; the module then logs a `FAILED to hook ...` line and leaves that screen unchanged. See [Reporting issues](#reporting-issues).
+> **Important:** Xiaomi's Contacts app is obfuscated and its internals change between versions. The module avoids depending on renamed names, but it is **only confirmed on the versions above**. On a version where a target can't be found, the module logs a `FAILED to hook ...` or `(Contacts app changed?)` line and leaves that screen unchanged. See [Reporting issues](#reporting-issues).
 
 ## Installation
 
@@ -49,8 +49,7 @@ Names are stored in the system call log's own name column, so they stay in your 
    | **Phone** (`com.android.incallui`) | Incoming call screen and notification |
    | **Contacts and dialer** (`com.android.contacts`) | Call history and the unknown-contact page |
 
-   Do not tick the storage providers (Contacts Storage, Call Log Backup, and so on). They are not needed.
-
+   
 4. **Reboot.** A reboot is required for the System Framework scope.
 5. Test with a call from a number that is not in your contacts.
 
@@ -60,7 +59,7 @@ Names appear only for **new** calls received after installing. Calls that are al
 
 1. **Incoming call** (`com.android.incallui`): the CNAP name is read from the call and filled into the contact cache entry, so the call screen and notification use it. The call card also gets a fallback so the UI stops treating the name as a bare number.
 2. **Call ends** (`com.android.server.telecom`, runs as the system user): right after Telecom writes the call-log row, the CNAP name is stored in that row's name column, only if the row has no name yet. Contacts always win.
-3. **History and detail page** (`com.android.contacts`): the Recents row and the "Unknown contact" header read that stored name and show it when there is no matching contact.
+3. **History and detail page** (`com.android.contacts`): the Recents row and the "Unknown contact" header read that stored name and show it when there is no matching contact. This app is obfuscated, so these hooks find their targets by class name, parameter types and the shape of the row layout instead of by renamed method names. That makes them far more tolerant of app updates, but not immune.
 
 Everything is event-driven. There is no service, no background thread, no receiver, no timer and no network access.
 
@@ -68,7 +67,7 @@ Everything is event-driven. There is no service, no background thread, no receiv
 
 - No background work, so no wakeups or battery drain of its own.
 - The only code that runs while scrolling is the Recents row hook. It exits early for contact rows, resolves its reflection handles once, and reads names from an in-memory map filled by a single query (refreshed at most every 10 seconds).
-- Logging is off by default. Only a few lines are written at startup. Set `DEBUG = true` in `CnapFixHook.java` to get verbose logs; phone numbers in logs are masked to the last four digits.
+- Logging is minimal: one line per app at startup (`<package>: N/N hooks active`), plus a line for any hook that could not be installed. A repeating error is logged once, so the log cannot grow while you use the phone. Phone numbers and names are never logged.
 - No internet permission. Nothing leaves the device; the only thing written is the caller name into the system call log.
 
 ## Known limitations
@@ -77,7 +76,7 @@ Everything is event-driven. There is no service, no background thread, no receiv
 - Old call-log entries are not back-filled.
 - If you later save the number as a contact, the contact name takes over.
 - The call-history rows on the detail page still show time and number, as in stock MIUI. Only the header changes.
-- Version-specific, see [Tested on](#tested-on).
+- Tested on one device and set of app versions, see [Tested on](#tested-on). Other versions may work but are unconfirmed.
 
 ## Troubleshooting
 
@@ -87,16 +86,17 @@ Collect the module's log lines:
 su -c 'logcat -d | grep -F "XiaomiCNAPFix"'
 ```
 
-You should see these after a reboot and after opening the Phone/Contacts app and receiving a call:
+After a reboot, and after opening the Phone/Contacts app and receiving a call, you should see one line per scope:
 
 | Log line | Means |
 |---|---|
-| `loaded into com.android.server.telecom` and `hooked Telecom CallLogManager...` | Telecom hook is active (needs the **System Framework** scope and a reboot) |
-| `loaded into com.android.incallui`, `hooked ContactInfoCache.buildEntry` | Call screen and notification hooks are active |
-| `loaded into com.android.contacts`, `hooked DialerCallVH.c(String)`, `hooked UnknownContactActivity.d(String)` | History and detail hooks are active |
-| `FAILED to hook ...` | The app version differs from the tested one; please open an issue |
+| `com.android.server.telecom: 1/1 hooks active` | Telecom hook is active (needs the **System Framework** scope and a reboot) |
+| `com.android.incallui: 2/2 hooks active` | Call screen and notification hooks are active |
+| `com.android.contacts: 3/3 hooks active` | History and unknown-contact hooks are active |
 
-If a line is missing, check that the scope is ticked and that you rebooted. For more detail, set `DEBUG = true`, rebuild, and repeat the test.
+A lower count, or a line that starts with `FAILED to hook ...` or mentions `(Contacts app changed?)`, means the installed app version differs from the tested one. That screen is left unchanged. Please open an issue.
+
+If a line is missing entirely, check that the scope is ticked and that you rebooted.
 
 ## Reporting issues
 
@@ -109,10 +109,10 @@ Please [open an issue](../../issues/new) and include:
    ```
 3. **LSPosed version** and which scopes you ticked
 4. **What you expected and what happened**, with a screenshot if it's a display problem
-5. **The log**, from the command in [Troubleshooting](#troubleshooting). Numbers are masked, but please check for anything private before posting.
+5. **The log**, from the command in [Troubleshooting](#troubleshooting). The module does not log numbers or names, but please check for anything private before posting.
 6. Whether **Google Dialer** shows the name on your SIM. If it does not, the carrier is not sending CNAP and this module can't help.
 
-If a `FAILED to hook` line appears on a different version, it also helps to attach a class dump of the affected app. Open the issue first and I'll say which one.
+If a hook fails on a different version, a class dump of the affected app helps. Open the issue first and I'll say which one.
 
 ## Building
 
@@ -127,7 +127,7 @@ gradle assembleRelease
 
 ## Credits
 
-- **AI assistance:** this module was developed with the help of an AI assistant, **Claude** by Anthropic. It was used to analyse the app dumps, work out where the name gets lost in Xiaomi's apps, and write and review the hooks. The module was tested by the author on a real device, and the design and decisions are the author's.
+- **AI assistance:** this module was developed with the help of multiple Free AI assistants. It was used to analyse the app dumps, work out where the name gets lost in Xiaomi's apps, and write and review the hooks. The module was tested by the author on a real device, and the design and decisions are the author's.
 - Built on the [LSPosed](https://github.com/LSPosed/LSPosed) / Xposed framework.
 
 ## License
