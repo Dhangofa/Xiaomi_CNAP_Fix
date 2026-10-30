@@ -2,9 +2,11 @@ package com.dhangofa.xiaomicnapfix;
 
 import android.content.ContentValues;
 import android.content.Context;
+import android.content.ContextWrapper;
 import android.database.Cursor;
 import android.net.Uri;
 import android.os.Bundle;
+import java.util.Set;
 import android.provider.CallLog;
 import android.text.TextUtils;
 import android.app.Activity;
@@ -48,6 +50,7 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage.LoadPackageParam;
 
     private static final String TAG = "XiaomiCNAPFix: ";
     private static final boolean DEBUG = false;  // true = verbose logs (masked numbers); costs I/O, keep off
+    private static final boolean DIAG = true;    // TEMPORARY: reports which activity opens the Unknown contact page
 
     private static final String PKG = "com.android.incallui";
     private static final String CLS_CALL = "com.android.incallui.Call";
@@ -64,6 +67,7 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage.LoadPackageParam;
     // Xiaomi Phone/Contacts app: Recents list row (com.android.contacts, dump of this build)
     private static final String PKG_CONTACTS = "com.android.contacts";
     private static final String CLS_CALL_VH = "com.android.contacts.dialer.list.VH.DialerCallVH";
+    private static final String CLS_TITLE_VIEW = "com.android.contacts.detail.ContactDetailTitleView";
     private static final String CLS_UNKNOWN_ACTIVITY =
             "com.android.contacts.activities.UnknownContactActivity";
     // Intent extra keys read by UnknownContactActivity.onCreate (public contract, not obfuscated).
@@ -96,6 +100,8 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage.LoadPackageParam;
 
             hookRecentsTitle(lpparam);
             hookUnknownContactTitle(lpparam);
+            hookDetailTitleView(lpparam);
+            if (DIAG) hookActivityWatcher();
 
         } else if (PKG_TELECOM.equals(lpparam.packageName)) {
             log("loaded into " + lpparam.packageName
@@ -582,20 +588,29 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage.LoadPackageParam;
 
                                 Activity activity = (Activity) param.thisObject;
                                 Intent intent = activity.getIntent();
-                                if (intent == null) return;
+                                if (intent == null) {
+                                    if (DIAG) log("DIAG UnknownContact.onCreate: no intent");
+                                    return;
+                                }
 
-                                if (!TextUtils.isEmpty(intent.getStringExtra(EXTRA_NAME))) return;
-
+                                String existingName = intent.getStringExtra(EXTRA_NAME);
                                 String number = intent.getStringExtra(EXTRA_NUMBER);
                                 if (TextUtils.isEmpty(number)) number = intent.getStringExtra(EXTRA_NUMBER_ALT);
-                                if (TextUtils.isEmpty(number)) return;
 
-                                String name = lookupName(activity, number);
-                                if (name == null) return;
+                                String name = null;
+                                if (TextUtils.isEmpty(existingName) && !TextUtils.isEmpty(number)) {
+                                    name = lookupName(activity, number);
+                                    if (name != null) intent.putExtra(EXTRA_NAME, name);
+                                }
 
-                                intent.putExtra(EXTRA_NAME, name);
-                                if (DEBUG) debug("UnknownContact: name extra <- CNAP '" + name + "' (number "
-                                        + mask(number) + ")");
+                                if (DIAG) {
+                                    log("DIAG UnknownContact.onCreate: extras=" + extraKeys(intent)
+                                            + " nameExtra=" + (TextUtils.isEmpty(existingName) ? "empty" : "set")
+                                            + " numberExtra=" + (TextUtils.isEmpty(number) ? "MISSING" : "found")
+                                            + " lookup=" + (name != null ? "hit" : "miss"));
+                                } else if (name != null && DEBUG) {
+                                    debug("UnknownContact: name extra <- CNAP '" + name + "' (number " + mask(number) + ")");
+                                }
                             } catch (Throwable t) {
                                 log("UnknownContact hook error: " + t);
                             }
@@ -605,6 +620,114 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage.LoadPackageParam;
         } catch (Throwable t) {
             log("FAILED to hook UnknownContactActivity.onCreate: " + t);
         }
+    }
+
+    // ------------------------------------------------------------------------------------------
+    // Hook 3c (com.android.contacts): the title view itself - independent of which activity hosts it.
+    //
+    // ContactDetailTitleView.setTitle(String) is where a detail page puts its title. If the page was
+    // opened for a number (intent has "number"/"data1", no "name", no contact URI) and a CNAP name is
+    // stored for that number, the name is shown. Contact pages carry a contact URI and are skipped.
+    // ------------------------------------------------------------------------------------------
+    private void hookDetailTitleView(final LoadPackageParam lpparam) {
+        try {
+            Class<?> titleView = XposedHelpers.findClassIfExists(CLS_TITLE_VIEW, lpparam.classLoader);
+            if (titleView == null) {
+                log("UnknownContact: ContactDetailTitleView not found (Contacts app changed?)");
+                return;
+            }
+
+            int hooked = 0;
+            for (Method m : titleView.getDeclaredMethods()) {
+                Class<?>[] p = m.getParameterTypes();
+                if (!m.getName().equals("setTitle") || Modifier.isStatic(m.getModifiers()) || p.length != 1
+                        || (p[0] != String.class && p[0] != CharSequence.class)) {
+                    continue;
+                }
+
+                XposedBridge.hookMethod(m, new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param) {
+                        try {
+                            applyToDetailTitle(param);
+                        } catch (Throwable t) {
+                            log("UnknownContact title hook error: " + t);
+                        }
+                    }
+                });
+                hooked++;
+            }
+
+            if (hooked == 0) log("UnknownContact: no setTitle(String) found on ContactDetailTitleView");
+            else log("hooked ContactDetailTitleView.setTitle (" + hooked + ")");
+        } catch (Throwable t) {
+            log("FAILED to hook ContactDetailTitleView: " + t);
+        }
+    }
+
+    private static void applyToDetailTitle(XC_MethodHook.MethodHookParam param) {
+        Activity host = hostActivity(((View) param.thisObject).getContext());
+        if (host == null) return;
+
+        Intent intent = host.getIntent();
+        if (intent == null) return;
+
+        String number = intent.getStringExtra(EXTRA_NUMBER);
+        if (TextUtils.isEmpty(number)) number = intent.getStringExtra(EXTRA_NUMBER_ALT);
+        boolean nameExtra = !TextUtils.isEmpty(intent.getStringExtra(EXTRA_NAME));
+        boolean contactPage = intent.getData() != null;
+        String name = (TextUtils.isEmpty(number) || nameExtra || contactPage) ? null : lookupName(host, number);
+
+        if (DIAG) {
+            log("DIAG UnknownContact.setTitle: host=" + host.getClass().getName()
+                    + " extras=" + extraKeys(intent) + " contactUri=" + contactPage
+                    + " nameExtra=" + nameExtra + " numberExtra=" + !TextUtils.isEmpty(number)
+                    + " lookup=" + (name != null ? "hit" : "miss") + " arg='" + param.args[0] + "'");
+        }
+
+        if (name != null) param.args[0] = name;
+    }
+
+    private static Activity hostActivity(Context c) {
+        for (int i = 0; i < 6 && c != null; i++) {
+            if (c instanceof Activity) return (Activity) c;
+            if (!(c instanceof ContextWrapper)) return null;
+            c = ((ContextWrapper) c).getBaseContext();
+        }
+        return null;
+    }
+
+    // ---- TEMPORARY diagnostics (DIAG): which Contacts activity is created, and what its intent carries.
+    private void hookActivityWatcher() {
+        try {
+            XposedHelpers.findAndHookMethod(Activity.class, "onCreate", Bundle.class, new XC_MethodHook() {
+                @Override
+                protected void afterHookedMethod(MethodHookParam param) {
+                    try {
+                        Activity a = (Activity) param.thisObject;
+                        String cls = a.getClass().getName();
+                        if (!cls.startsWith("com.android.contacts")) return;
+
+                        Intent i = a.getIntent();
+                        log("DIAG activity: " + cls + " extras=" + extraKeys(i)
+                                + " action=" + (i == null ? "-" : i.getAction())
+                                + " dataScheme=" + (i == null || i.getData() == null ? "none" : i.getData().getScheme()));
+                    } catch (Throwable ignored) {
+                        // diagnostics only
+                    }
+                }
+            });
+            log("DIAG activity watcher installed");
+        } catch (Throwable t) {
+            log("DIAG watcher failed: " + t);
+        }
+    }
+
+    /** Extra KEY names only (never values), so logs stay free of numbers and names. */
+    private static String extraKeys(Intent i) {
+        if (i == null || i.getExtras() == null) return "[]";
+        Set<String> keys = i.getExtras().keySet();
+        return keys == null ? "[]" : keys.toString();
     }
 
     // ------------------------------------------------------------------------------------------
@@ -872,4 +995,4 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage.LoadPackageParam;
         }
     }
 }
-                                
+                
