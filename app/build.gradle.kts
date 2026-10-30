@@ -3,11 +3,11 @@ plugins {
 }
 
 android {
-    namespace = "com.dhangofa.xiaomicnapfix"
+    namespace = "io.github.dhangofa.xiaomicnapfix"
     compileSdk = 36
 
     defaultConfig {
-        applicationId = "com.dhangofa.xiaomicnapfix"
+        applicationId = "io.github.dhangofa.xiaomicnapfix"
         minSdk = 28
         targetSdk = 37
         versionCode = 18
