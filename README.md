@@ -120,8 +120,8 @@ If a hook fails on a different version, a class dump of the affected app helps. 
 
 - JDK 17, Android Gradle build
 - The Xposed API is `compileOnly`: `de.robv.android.xposed:api:82`, so it is not packaged into the APK
-- Entry point (`assets/xposed_init`): `com.dhangofa.xiaomicnapfix.CnapFixHook`
-- Main logic: `app/src/main/java/com/dhangofa/xiaomicnapfix/CnapFixHook.java`
+- Entry point (`assets/xposed_init`): `io.github.dhangofa.xiaomicnapfix.CnapFixHook`
+- Main logic: `app/src/main/java/io/github/dhangofa/xiaomicnapfix/CnapFixHook.java`
 
 ```
 gradle assembleRelease
