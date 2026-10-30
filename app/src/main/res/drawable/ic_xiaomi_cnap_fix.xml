@@ -1,0 +1,334 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- Rounded-square icon boundary -->
+    <clip-path
+        android:name="icon_clip"
+        android:pathData="M22,4
+                          L86,4
+                          C96,4 104,12 104,22
+                          L104,86
+                          C104,96 96,104 86,104
+                          L22,104
+                          C12,104 4,96 4,86
+                          L4,22
+                          C4,12 12,4 22,4
+                          Z" />
+
+    <!-- Main green background -->
+    <path
+        android:pathData="M22,4
+                          L86,4
+                          C96,4 104,12 104,22
+                          L104,86
+                          C104,96 96,104 86,104
+                          L22,104
+                          C12,104 4,96 4,86
+                          L4,22
+                          C4,12 12,4 22,4
+                          Z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:type="linear"
+                android:startX="10"
+                android:startY="98"
+                android:endX="98"
+                android:endY="8">
+                <item
+                    android:color="#FF16B86C"
+                    android:offset="0" />
+                <item
+                    android:color="#FF04A85C"
+                    android:offset="0.47" />
+                <item
+                    android:color="#FF70D994"
+                    android:offset="1" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- Dark central background wave -->
+    <path
+        android:pathData="M4,41
+                          C19,18 37,8 54,11
+                          C70,14 71,31 78,43
+                          C85,55 96,56 104,49
+                          L104,81
+                          C91,84 76,82 64,73
+                          C50,62 42,59 33,61
+                          C21,64 12,71 4,76
+                          Z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:type="linear"
+                android:startX="15"
+                android:startY="20"
+                android:endX="94"
+                android:endY="80">
+                <item
+                    android:color="#99007848"
+                    android:offset="0" />
+                <item
+                    android:color="#66009457"
+                    android:offset="0.55" />
+                <item
+                    android:color="#2200C675"
+                    android:offset="1" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- Bottom-left translucent wave -->
+    <path
+        android:fillColor="#443BDF87"
+        android:pathData="M4,61
+                          C19,66 29,76 34,88
+                          C37,94 38,100 38,104
+                          L22,104
+                          C12,104 4,96 4,86
+                          Z" />
+
+    <!-- Bottom-right translucent wave -->
+    <path
+        android:pathData="M38,104
+                          C48,87 62,74 79,68
+                          C90,64 98,60 104,55
+                          L104,86
+                          C104,96 96,104 86,104
+                          Z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:type="linear"
+                android:startX="43"
+                android:startY="99"
+                android:endX="100"
+                android:endY="62">
+                <item
+                    android:color="#AA8BE7A7"
+                    android:offset="0" />
+                <item
+                    android:color="#667BE4A2"
+                    android:offset="1" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- Handset shadow -->
+    <path
+        android:fillColor="#28005032"
+        android:pathData="M29,27
+                          C25,28 22,31 20,35
+                          C17,42 20,55 26,65
+                          C34,78 45,88 58,94
+                          C67,98 77,100 84,96
+                          C88,94 91,89 89,85
+                          L83,77
+                          C81,74 77,74 74,76
+                          L66,82
+                          C63,84 60,84 57,82
+                          C49,77 40,69 35,60
+                          C33,57 33,54 35,51
+                          L40,44
+                          C42,41 42,37 40,34
+                          L35,29
+                          C33,27 31,26 29,27
+                          Z" />
+
+    <!-- White Xiaomi-style handset -->
+    <path
+        android:pathData="M27,25
+                          C23,26 20,29 18,33
+                          C15,40 18,53 24,63
+                          C32,76 43,86 56,92
+                          C65,96 75,98 82,94
+                          C86,92 89,87 87,83
+                          L81,75
+                          C79,72 75,72 72,74
+                          L64,80
+                          C61,82 58,82 55,80
+                          C47,75 38,67 33,58
+                          C31,55 31,52 33,49
+                          L38,42
+                          C40,39 40,35 38,32
+                          L33,27
+                          C31,25 29,24 27,25
+                          Z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:type="linear"
+                android:startX="24"
+                android:startY="28"
+                android:endX="78"
+                android:endY="94">
+                <item
+                    android:color="#FFFFFFFF"
+                    android:offset="0" />
+                <item
+                    android:color="#FFF5FFFA"
+                    android:offset="0.58" />
+                <item
+                    android:color="#FFCDEEDC"
+                    android:offset="1" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- Handset highlight -->
+    <path
+        android:fillColor="#66FFFFFF"
+        android:pathData="M27,27
+                          C24,29 22,32 21,36
+                          C19,43 22,52 27,61
+                          C34,72 44,82 56,88
+                          C62,91 69,93 75,93
+                          C69,91 62,88 57,85
+                          C46,79 37,70 31,60
+                          C26,51 23,42 25,35
+                          C26,31 28,28 31,26
+                          C30,26 28,26 27,27
+                          Z" />
+
+    <!-- Profile-card shadow -->
+    <path
+        android:fillColor="#24004F31"
+        android:pathData="M51,34
+                          L77,34
+                          C81,34 83,36 84,39
+                          C85,42 87,43 90,43
+                          L94,43
+                          C99,43 102,46 102,51
+                          L102,61
+                          C102,66 99,69 94,69
+                          L61,69
+                          L55,74
+                          C53,76 51,75 51,72
+                          L51,68
+                          C47,67 45,64 45,60
+                          L45,43
+                          C45,38 47,34 51,34
+                          Z" />
+
+    <!-- CNAP profile card -->
+    <path
+        android:pathData="M50,32
+                          L76,32
+                          C80,32 82,34 83,37
+                          C84,40 86,41 89,41
+                          L93,41
+                          C98,41 101,44 101,49
+                          L101,59
+                          C101,64 98,67 93,67
+                          L60,67
+                          L54,72
+                          C52,74 50,73 50,70
+                          L50,66
+                          C46,65 44,62 44,58
+                          L44,41
+                          C44,36 46,32 50,32
+                          Z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:type="linear"
+                android:startX="47"
+                android:startY="34"
+                android:endX="98"
+                android:endY="68">
+                <item
+                    android:color="#FFF9FFFC"
+                    android:offset="0" />
+                <item
+                    android:color="#FFE6F7ED"
+                    android:offset="0.58" />
+                <item
+                    android:color="#FFCAE7D7"
+                    android:offset="1" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- Profile head -->
+    <path
+        android:fillColor="#FF18A85F"
+        android:pathData="M57,38
+                          A5,5 0,1 1,57,48
+                          A5,5 0,1 1,57,38
+                          Z" />
+
+    <!-- Profile shoulders -->
+    <path
+        android:fillColor="#FF109C56"
+        android:pathData="M49,58
+                          C49,51 52,47 57,47
+                          C62,47 65,51 65,58
+                          C65,60 64,61 62,61
+                          L52,61
+                          C50,61 49,60 49,58
+                          Z" />
+
+    <!-- Primary name line -->
+    <path
+        android:fillColor="#FF12A45B"
+        android:pathData="M70,44
+                          L91,44
+                          C93,44 94,45 94,47
+                          C94,49 93,50 91,50
+                          L70,50
+                          C68,50 67,49 67,47
+                          C67,45 68,44 70,44
+                          Z" />
+
+    <!-- Secondary number line -->
+    <path
+        android:fillColor="#8894C8AA"
+        android:pathData="M70,53
+                          L86,53
+                          C88,53 89,54 89,56
+                          C89,58 88,59 86,59
+                          L70,59
+                          C68,59 67,58 67,56
+                          C67,54 68,53 70,53
+                          Z" />
+
+    <!-- Outer CNAP signal -->
+    <path
+        android:fillColor="#CCEAFFF2"
+        android:pathData="M72,17
+                          C84,18 92,26 94,38
+                          C94,40 93,42 91,42
+                          C89,42 88,41 88,39
+                          C87,30 80,24 72,23
+                          C70,23 69,22 69,20
+                          C69,18 70,17 72,17
+                          Z" />
+
+    <!-- Inner CNAP signal -->
+    <path
+        android:fillColor="#CCDDFFEA"
+        android:pathData="M72,25
+                          C80,26 85,31 86,39
+                          C86,41 85,42 83,42
+                          C81,42 80,41 80,39
+                          C79,34 76,31 72,31
+                          C70,31 69,30 69,28
+                          C69,26 70,25 72,25
+                          Z" />
+
+    <!-- Subtle top-left surface highlight -->
+    <path
+        android:fillColor="#24FFFFFF"
+        android:pathData="M22,4
+                          L86,4
+                          C96,4 104,12 104,22
+                          L104,29
+                          C94,21 82,16 67,13
+                          C45,9 25,15 4,31
+                          L4,22
+                          C4,12 12,4 22,4
+                          Z" />
+
+</vector>
