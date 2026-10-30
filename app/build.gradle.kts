@@ -4,12 +4,12 @@ plugins {
 
 android {
     namespace = "com.dhangofa.xiaomicnapfix"
-    compileSdk = 34
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "com.dhangofa.xiaomicnapfix"
         minSdk = 28
-        targetSdk = 34
+        targetSdk = 37
         versionCode = 1
         versionName = "1.0.0"
     }
