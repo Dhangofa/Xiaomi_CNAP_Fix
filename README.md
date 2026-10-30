@@ -133,3 +133,16 @@ gradle assembleRelease
 ## License
 
 MIT, see [LICENSE](LICENSE).
+
+## Trademark notice
+
+Xiaomi, MI, MIUI, HyperOS, Redmi, and their associated names and logos are
+trademarks of Xiaomi Corporation and/or its affiliates.
+
+Xiaomi CNAP Fix is an independent, unofficial, open-source compatibility
+module. This project is not affiliated with, endorsed by, sponsored by, or
+approved by Xiaomi Corporation.
+
+The Xiaomi logo shown in project artwork is used only to identify the platform
+with which this module is designed to work. No ownership of Xiaomi trademarks
+or brand assets is claimed.
