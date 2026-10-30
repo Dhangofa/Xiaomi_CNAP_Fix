@@ -1,4 +1,4 @@
-package com.dhangofa.xiaomicnapfix;
+package io.github.dhangofa.xiaomicnapfix;
 
 import android.app.Activity;
 import android.content.ContentValues;
