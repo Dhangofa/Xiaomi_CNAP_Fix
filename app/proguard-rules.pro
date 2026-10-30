@@ -1,1 +1,1 @@
--keep class com.dhangofa.xiaomicnapfix.** { *; }
+-keep class io.github.dhangofa.xiaomicnapfix.** { *; }
